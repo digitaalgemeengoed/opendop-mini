@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import type { Actor, Inhoud } from "@oa/contract";
-import { INHOUD_SCHEMA } from "@oa/contract";
+import type { Actor, Inhoud } from "@digitaalgemeengoed/oa-contract";
+import { INHOUD_SCHEMA } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
 import type { Opslag } from "./opslag.js";
 import {

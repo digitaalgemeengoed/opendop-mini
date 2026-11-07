@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { OBJECTTYPE_DOCUMENT_V1 } from "@oa/contract";
+import { OBJECTTYPE_DOCUMENT_V1 } from "@digitaalgemeengoed/oa-contract";
 
 const map = join(dirname(fileURLToPath(import.meta.url)), "..", "migraties");
 

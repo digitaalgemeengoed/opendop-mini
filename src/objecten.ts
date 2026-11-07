@@ -7,7 +7,7 @@ import type {
   Informatieobject,
   Objecttype,
   Versie,
-} from "@oa/contract";
+} from "@digitaalgemeengoed/oa-contract";
 import type { Client } from "./db.js";
 import type { Opslag } from "./opslag.js";
 import { schemaBruikbaar, toets, type Toetsing } from "./validatie.js";

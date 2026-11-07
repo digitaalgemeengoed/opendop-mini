@@ -11,14 +11,15 @@ import { migreer } from "../dist/migreer.js";
 import { maakPool } from "../dist/db.js";
 import { LokaleOpslag } from "../dist/opslag.js";
 import { bouwServer } from "../dist/server.js";
-import { verwerkRonde } from "../dist/worker.js";
+import { verwerkRonde, maakVerwerkers } from "../dist/worker.js";
+import { GeenZoekindex } from "../dist/zoekindex.js";
 
 const BEHEER = process.env.TEST_DATABASE_URL_BEHEER;
 const APP = process.env.TEST_DATABASE_URL;
 const overslaan = !BEHEER || !APP;
 const SLEUTEL = "test-dienstsleutel-0123456789";
 
-let app, map, pool;
+let app, map, pool, middelen;
 
 const actor = (sub) => Buffer.from(JSON.stringify({ sub, naam: sub })).toString("base64url");
 const kop = (gemeente = "haarlem", sub = "medewerker-1") => ({
@@ -38,7 +39,8 @@ before(async () => {
   });
   pool = maakPool(APP);
   map = await mkdtemp(join(tmpdir(), "oa-opslag-"));
-  app = bouwServer({ opslag: new LokaleOpslag(map), dienstsleutel: SLEUTEL, maxBytes: 1024 * 1024, log: false });
+  middelen = { opslag: new LokaleOpslag(map), sleutelbeheer: null, maxBytes: 1024 * 1024 };
+  app = bouwServer({ middelen, zoekindex: new GeenZoekindex(), dienstsleutel: SLEUTEL, log: false });
 });
 
 after(async () => {
@@ -160,7 +162,7 @@ test("een objecttype publiceren levert een nieuwe versie; bestaande objecten hou
 
 test("de worker verwerkt de outbox", { skip: overslaan }, async () => {
   const beheer = new pg.Pool({ connectionString: BEHEER });
-  const n = await verwerkRonde(beheer);
+  const n = await verwerkRonde(beheer, maakVerwerkers(beheer, middelen, new GeenZoekindex()));
   assert.ok(n >= 4);
   const rest = await beheer.query("SELECT count(*)::int AS n FROM outbox WHERE status = 'wachtend'");
   assert.equal(rest.rows[0].n, 0);

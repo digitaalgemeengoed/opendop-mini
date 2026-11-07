@@ -1,9 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import type { Actor, Inhoud } from "@digitaalgemeengoed/oa-contract";
+import type { Actor, Inhoud, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
 import { INHOUD_SCHEMA } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
-import type { Opslag } from "./opslag.js";
+import { ZoekenUit, type Zoekindex } from "./zoekindex.js";
 import {
   PlatformFout,
   leesGebeurtenissen,
@@ -13,8 +13,10 @@ import {
   legMetadataVast,
   lijstObjecttypen,
   maakObject,
+  maakOnleesbaar,
   publiceerObjecttype,
   voegVersieToe,
+  type Middelen,
 } from "./objecten.js";
 
 interface Context {
@@ -26,8 +28,9 @@ interface Context {
  * De Object Service. Alleen de integratielaag roept haar aan; die stelt
  * vast wie er belt en geeft gemeente en actor mee.
  */
-export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxBytes: number; log?: boolean }): FastifyInstance {
-  const app = Fastify({ logger: opties.log ?? true, bodyLimit: Math.ceil(opties.maxBytes * 1.4) + 65536 });
+export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; dienstsleutel: string; log?: boolean }): FastifyInstance {
+  const m = opties.middelen;
+  const app = Fastify({ logger: opties.log ?? true, bodyLimit: Math.ceil(m.maxBytes * 1.4) + 65536 });
   const sleutel = Buffer.from(opties.dienstsleutel);
 
   function context(req: FastifyRequest): Context {
@@ -48,6 +51,9 @@ export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxB
   }
 
   app.setErrorHandler((fout, _req, antwoord) => {
+    if (fout instanceof ZoekenUit) {
+      return antwoord.status(503).send({ fout: "zoeken-uit", melding: fout.message });
+    }
     if (fout instanceof PlatformFout) {
       return antwoord.status(fout.status).send({ fout: fout.code, melding: fout.message, details: fout.details });
     }
@@ -61,7 +67,12 @@ export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxB
     return antwoord.status(500).send({ fout: "intern", melding: "Er ging iets mis in het platform." });
   });
 
-  app.get("/gezondheid", async () => ({ status: "ok", opslag: opties.opslag.soort }));
+  app.get("/gezondheid", async () => ({
+    status: "ok",
+    opslag: m.opslag.soort,
+    sleutelbeheer: m.sleutelbeheer?.soort ?? "uit",
+    zoekindex: opties.zoekindex.soort,
+  }));
 
   // --- Objecttypen ---------------------------------------------------------
 
@@ -115,7 +126,7 @@ export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxB
     },
     async (req, antwoord) => {
       const { gemeente, actor } = context(req);
-      const o = await inGemeente(gemeente, (c) => maakObject(c, opties.opslag, gemeente, actor, req.body, opties.maxBytes));
+      const o = await inGemeente(gemeente, (c) => maakObject(c, m, gemeente, actor, req.body));
       return antwoord.status(201).send(o);
     },
   );
@@ -166,7 +177,7 @@ export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxB
     async (req, antwoord) => {
       const { gemeente, actor } = context(req);
       const o = await inGemeente(gemeente, (c) =>
-        voegVersieToe(c, opties.opslag, gemeente, actor, req.params.id, req.body.inhoud, opties.maxBytes, req.body.verwachteVolgnummer),
+        voegVersieToe(c, m, gemeente, actor, req.params.id, req.body.inhoud, req.body.verwachteVolgnummer),
       );
       return antwoord.status(201).send(o);
     },
@@ -174,9 +185,78 @@ export function bouwServer(opties: { opslag: Opslag; dienstsleutel: string; maxB
 
   app.get<{ Params: { id: string; nummer: string } }>("/objecten/:id/versies/:nummer/inhoud", async (req, antwoord) => {
     const { gemeente } = context(req);
-    const r = await inGemeente(gemeente, (c) => leesInhoud(c, opties.opslag, gemeente, req.params.id, Number(req.params.nummer)));
+    const r = await inGemeente(gemeente, (c) => leesInhoud(c, m, gemeente, req.params.id, Number(req.params.nummer)));
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
+
+  app.post<{ Params: { id: string }; Body: { reden: string } }>(
+    "/objecten/:id/onleesbaar",
+    { schema: { body: { type: "object", required: ["reden"], properties: { reden: { type: "string", minLength: 10, maxLength: 1000 } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, (c) => maakOnleesbaar(c, m, gemeente, actor, req.params.id, req.body.reden));
+    },
+  );
+
+  // --- Zoeken (OA-ADR-007) ----------------------------------------------------
+
+  app.get<{ Querystring: { tekst: string; informatiecategorie?: string; vertrouwelijkheid?: string; objecttype?: string; aantal?: number } }>(
+    "/zoeken",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          required: ["tekst"],
+          properties: {
+            tekst: { type: "string", minLength: 2, maxLength: 200 },
+            informatiecategorie: { type: "string", maxLength: 100 },
+            vertrouwelijkheid: { type: "string", maxLength: 40 },
+            objecttype: { type: "string", maxLength: 60 },
+            aantal: { type: "integer", minimum: 1, maximum: 50 },
+          },
+        },
+      },
+    },
+    async (req): Promise<Zoekantwoord> => {
+      const { gemeente } = context(req);
+      const vraag = req.query;
+      const treffers = await opties.zoekindex.zoek(gemeente, vraag);
+      if (treffers.length === 0) return { resultaten: [], nietBevestigd: 0 };
+      // De index is nooit de bron van waarheid: elk resultaat wordt in het
+      // register bevestigd, met Row Level Security, en de metadata komt
+      // uit het register. Filters worden opnieuw op het register toegepast.
+      const rijen = await inGemeente(gemeente, async (c) =>
+        (
+          await c.query(
+            `SELECT o.identificatie, o.objecttype_naam, o.objecttype_versie, o.metadata,
+                    (SELECT max(nummer) FROM versies v WHERE v.object = o.identificatie) AS versie
+               FROM objecten o
+              WHERE o.identificatie = ANY($1::uuid[]) AND o.onleesbaar_gemaakt IS NULL`,
+            [treffers.map((t) => t.identificatie)],
+          )
+        ).rows,
+      );
+      const perId = new Map(rijen.map((r) => [r.identificatie as string, r]));
+      const resultaten: Zoekresultaat[] = [];
+      for (const t of treffers) {
+        const r = perId.get(t.identificatie);
+        if (!r) continue;
+        const md = r.metadata as Record<string, unknown>;
+        if (vraag.informatiecategorie && md.informatiecategorie !== vraag.informatiecategorie) continue;
+        if (vraag.vertrouwelijkheid && md.vertrouwelijkheid !== vraag.vertrouwelijkheid) continue;
+        if (vraag.objecttype && r.objecttype_naam !== vraag.objecttype) continue;
+        resultaten.push({
+          identificatie: t.identificatie,
+          objecttype: { naam: r.objecttype_naam, versie: r.objecttype_versie },
+          metadata: md,
+          versie: r.versie,
+          fragmenten: t.fragmenten,
+          score: t.score,
+        });
+      }
+      return { resultaten, nietBevestigd: treffers.length - resultaten.length };
+    },
+  );
 
   return app;
 }

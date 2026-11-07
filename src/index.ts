@@ -4,6 +4,33 @@ import { maakOpslag } from "./opslag.js";
 import { bouwServer } from "./server.js";
 import { leesGemeenten, migreer } from "./migreer.js";
 import { draaiWorker } from "./worker.js";
+import { LokaalSleutelbeheer, OpenBaoSleutelbeheer, type Sleutelbeheer } from "./sleutelbeheer.js";
+import { GeenZoekindex, OpenSearchZoekindex, type Zoekindex } from "./zoekindex.js";
+import type { Middelen } from "./objecten.js";
+
+function maakSleutelbeheer(): Sleutelbeheer | null {
+  const s = config.sleutelbeheer;
+  if (s.soort === "openbao") return new OpenBaoSleutelbeheer(s.openbaoAdres(), s.openbaoToken(), s.openbaoTransit);
+  if (s.soort === "lokaal") return new LokaalSleutelbeheer(s.lokaalPad);
+  return null;
+}
+
+function maakZoekindex(): Zoekindex {
+  const z = config.zoekindex;
+  if (z.soort === "opensearch") return new OpenSearchZoekindex(z.adres(), z.voorvoegsel, { gebruiker: z.gebruiker, wachtwoord: z.wachtwoord });
+  return new GeenZoekindex();
+}
+
+function middelen(): Middelen {
+  const sleutelbeheer = maakSleutelbeheer();
+  if (sleutelbeheer instanceof OpenBaoSleutelbeheer) {
+    const vernieuw = () =>
+      sleutelbeheer.vernieuwToken().catch((e: Error) => console.error(`sleutelbeheer: ${e.message}`));
+    void vernieuw();
+    setInterval(vernieuw, 12 * 3600_000).unref();
+  }
+  return { opslag: maakOpslag(), sleutelbeheer, maxBytes: config.maxInhoudBytes };
+}
 
 const opdracht = process.argv[2] ?? "server";
 
@@ -13,11 +40,10 @@ if (opdracht === "migreer") {
     gemeenten: leesGemeenten(process.env.GEMEENTEN),
   });
 } else if (opdracht === "worker") {
-  await draaiWorker(config.databaseUrlBeheer());
+  await draaiWorker(config.databaseUrlBeheer(), middelen(), maakZoekindex());
   console.log("outbox-worker draait");
 } else {
   maakPool(config.databaseUrl());
-  const opslag = maakOpslag();
-  const app = bouwServer({ opslag, dienstsleutel: config.dienstsleutel(), maxBytes: config.maxInhoudBytes });
+  const app = bouwServer({ middelen: middelen(), zoekindex: maakZoekindex(), dienstsleutel: config.dienstsleutel() });
   await app.listen({ port: config.poort, host: config.host });
 }

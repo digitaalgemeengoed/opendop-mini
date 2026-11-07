@@ -28,5 +28,21 @@ export const config = {
     /** Bucket per gemeente: <voorvoegsel><gemeente>. */
     bucketVoorvoegsel: process.env.S3_BUCKET_VOORVOEGSEL ?? "oa-",
   },
+  /** "uit", "lokaal" (sleutels op schijf, alleen ontwikkeling) of "openbao" (OA-ADR-008). */
+  sleutelbeheer: {
+    soort: (process.env.SLEUTELBEHEER ?? "uit") as "uit" | "lokaal" | "openbao",
+    lokaalPad: process.env.SLEUTELBEHEER_PAD ?? "./data/sleutels",
+    openbaoAdres: () => nodig("OPENBAO_ADRES"),
+    openbaoToken: () => nodig("OPENBAO_TOKEN"),
+    openbaoTransit: process.env.OPENBAO_TRANSIT ?? "transit",
+  },
+  /** "uit" of "opensearch" (OA-ADR-007). */
+  zoekindex: {
+    soort: (process.env.ZOEKINDEX ?? "uit") as "uit" | "opensearch",
+    adres: () => nodig("OPENSEARCH_ADRES"),
+    gebruiker: process.env.OPENSEARCH_GEBRUIKER ?? "",
+    wachtwoord: process.env.OPENSEARCH_WACHTWOORD ?? "",
+    voorvoegsel: process.env.OPENSEARCH_VOORVOEGSEL ?? "oa-",
+  },
   maxInhoudBytes: Number(process.env.MAX_INHOUD_BYTES ?? 25 * 1024 * 1024),
 };

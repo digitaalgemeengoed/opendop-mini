@@ -22,6 +22,22 @@ Alleen de integratielaag mag het platform aanroepen (gedeelde dienstsleutel; in 
 
 In de uitrol is de S3-opslag SILO, de open-source voortzetting van MinIO (OA-ADR-006). De code gebruikt alleen de S3-API; elke S3-opslag met Object Lock werkt.
 
+## Versleuteling per object (OA-ADR-008)
+
+Met `SLEUTELBEHEER=openbao` krijgt elk nieuw object een eigen sleutel in de transit-engine van OpenBao (`transit/keys/oa-<gemeente>-<object>`). De inhoud wordt met AES-256-GCM versleuteld voordat zij de opslag in gaat; het platform bewaart alleen de verpakte datasleutel. Elke versie is aan object en versienummer gebonden.
+
+**Onleesbaar maken** (`POST /objecten/:id/onleesbaar`, met een reden van minstens tien tekens; in de integratielaag alleen voor de rol beheerder) vernietigt de sleutel. Alle versies zijn daarna onleesbaar, ook in back-ups van database en opslag. De registratie en de gebeurtenissen blijven, met de gebeurtenis `object.onleesbaar-gemaakt` en de reden. Dit werkt samen met Object Lock: de opslag weigert verwijderen, de sleutel maakt de inhoud toch onbruikbaar.
+
+Let op: snapshots van OpenBao bevatten de sleutels nog. Begrens hun bewaartermijn, anders is vernietigen niet definitief. Het platform vernieuwt zijn periodieke token zelf (bij het starten en elke twaalf uur).
+
+`SLEUTELBEHEER=lokaal` doet hetzelfde met sleutels op schijf, voor ontwikkeling en tests. `uit` versleutelt niet; bestaande versleutelde objecten zijn dan niet te lezen.
+
+## Zoeken (OA-ADR-007)
+
+Met `ZOEKINDEX=opensearch` zet de worker na elke vastlegging de huidige stand van het object in de index van de gemeente (`oa-<gemeente>`): metadata en de tekst van de laatste versie. `GET /zoeken?tekst=…` zoekt in die index en **bevestigt elk resultaat in het register**, met Row Level Security; de metadata in het antwoord komt uit het register en filters worden ook daar toegepast. Treffers die het register niet bevestigt, worden alleen geteld (`nietBevestigd`). Onleesbaar gemaakte objecten gaan uit de index.
+
+De index bevat leesbare tekst, ook van versleutelde stukken. Bescherm hem even goed als de opslag. Met `ZOEKINDEX=uit` geeft zoeken 503.
+
 ## Gebruik
 
 | Opdracht | Wat |
@@ -30,11 +46,11 @@ In de uitrol is de S3-opslag SILO, de open-source voortzetting van MinIO (OA-ADR
 | `npm start` | De Object Service op poort 4100 |
 | `npm run worker` | De outbox-worker |
 
-Omgevingsvariabelen staan in `src/config.ts`.
+Omgevingsvariabelen staan in `src/config.ts`. De worker heeft dezelfde instellingen voor opslag, sleutelbeheer en zoekindex nodig als de server.
 
 ## Testen
 
-De integratietest draait tegen een echte, lege PostgreSQL:
+De integratietests draaien tegen een echte, lege PostgreSQL, en voor fase 1b tegen nabootsingen van de transit-API van OpenBao en van de zoek-API van OpenSearch (met de echte OpenSearch-client):
 
 ```
 npm run build

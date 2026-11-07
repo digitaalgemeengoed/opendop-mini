@@ -56,7 +56,7 @@ export class LokaleOpslag implements Opslag {
 }
 
 /**
- * S3-opslag (MinIO). Eén bucket per gemeente, aangemaakt met versiebeheer
+ * S3-opslag (SILO of een andere S3 met Object Lock). Eén bucket per gemeente, aangemaakt met versiebeheer
  * en Object Lock: dat kan alleen bij het aanmaken van de bucket (OA-ADR-005).
  * Bewaartermijnen worden in het prototype nog niet gezet; de archieffuncties
  * zijn gesimuleerd.

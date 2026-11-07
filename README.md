@@ -20,7 +20,7 @@ Alleen de integratielaag mag het platform aanroepen (gedeelde dienstsleutel; in 
 
 `OPSLAG=s3` schrijft naar S3 met één bucket per gemeente, aangemaakt met versiebeheer en **Object Lock**: dat kan alleen bij het aanmaken van een bucket (OA-ADR-005). Bewaartermijnen, legal hold en bestuurde verwijdering zijn in het prototype nog gesimuleerd. `OPSLAG=lokaal` schrijft naar schijf, voor ontwikkeling en tests.
 
-Let op: MinIO publiceert sinds oktober 2025 geen community-images meer. De code gebruikt alleen de S3-API; de keuze van de S3-opslag staat open.
+In de uitrol is de S3-opslag SILO, de open-source voortzetting van MinIO (OA-ADR-006). De code gebruikt alleen de S3-API; elke S3-opslag met Object Lock werkt.
 
 ## Gebruik
 

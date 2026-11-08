@@ -1,5 +1,5 @@
 import pg from "pg";
-import { leesInhoud, type Middelen } from "./objecten.js";
+import { leesInhoud, leesWeergave, type Middelen } from "./objecten.js";
 import { tekstUit, type Zoekindex } from "./zoekindex.js";
 
 /**
@@ -42,7 +42,10 @@ export function maakVerwerkers(pool: pg.Pool, m: Middelen, zoekindex: Zoekindex)
       const versie: number | null = v.rows[0]?.nummer ?? null;
       let tekst = "";
       if (versie !== null) {
-        const inhoud = await leesInhoud(pool as unknown as pg.PoolClient, m, gemeente, id, versie);
+        // Heeft de versie een html-weergave (naast een docx of odt), indexeer die.
+        const w = await pool.query("SELECT 1 FROM weergaven WHERE object = $1 AND nummer = $2 AND formaat = 'html'", [id, versie]);
+        const c = pool as unknown as pg.PoolClient;
+        const inhoud = w.rowCount ? await leesWeergave(c, m, gemeente, id, versie, "html") : await leesInhoud(c, m, gemeente, id, versie);
         tekst = tekstUit(inhoud.formaat, inhoud.data);
       }
       await zoekindex.indexeer(gemeente, {

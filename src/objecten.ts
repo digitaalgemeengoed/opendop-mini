@@ -7,6 +7,7 @@ import type {
   Informatieobject,
   Objecttype,
   Versie,
+  Weergave,
 } from "@digitaalgemeengoed/oa-contract";
 import type { Client } from "./db.js";
 import type { Opslag } from "./opslag.js";
@@ -145,6 +146,9 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
   if (r.rowCount === 0) throw new PlatformFout(404, "object-onbekend", "Dit object bestaat niet.");
   const o = r.rows[0];
   const v = await c.query("SELECT * FROM versies WHERE object = $1 ORDER BY nummer", [id]);
+  const w = await c.query("SELECT nummer, formaat, media_type, grootte, sha256 FROM weergaven WHERE object = $1 ORDER BY nummer, formaat", [id]);
+  const weergavenVan = (nummer: number): Weergave[] =>
+    w.rows.filter((x) => x.nummer === nummer).map((x) => ({ formaat: x.formaat, mediaType: x.media_type, grootte: Number(x.grootte), sha256: x.sha256 }));
   const type = await leesObjecttype(c, o.objecttype_naam, o.objecttype_versie);
   const t = toets(`${type.naam}@${type.versie}`, type.schema, o.metadata);
   return {
@@ -161,6 +165,7 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
         formaat: x.formaat,
         vastgelegd: x.vastgelegd.toISOString(),
         door: x.door,
+        ...(weergavenVan(x.nummer).length ? { weergaven: weergavenVan(x.nummer) } : {}),
       }),
     ),
     aangemaakt: o.aangemaakt.toISOString(),
@@ -186,7 +191,7 @@ export async function maakObject(
   m: Middelen,
   gemeente: string,
   actor: Actor,
-  vraag: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud },
+  vraag: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud },
 ): Promise<ObjectMetStaat> {
   const type = await leesObjecttype(c, vraag.objecttype);
   const metadata = vraag.metadata ?? {};
@@ -209,7 +214,7 @@ export async function maakObject(
     [id, gemeente, type.naam, type.versie, metadata, g.volgnummer, g.tijdstip, actor.sub, verpakt !== null, verpakt],
   );
   await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
-  if (vraag.inhoud) await voegVersieToe(c, m, gemeente, actor, id, vraag.inhoud);
+  if (vraag.inhoud) await voegVersieToe(c, m, gemeente, actor, id, vraag.inhoud, undefined, vraag.weergave);
   return leesObject(c, id);
 }
 
@@ -286,29 +291,41 @@ export async function voegVersieToe(
   id: string,
   inhoud: Inhoud,
   verwachteVolgnummer?: number,
+  weergave?: Inhoud,
 ): Promise<ObjectMetStaat> {
   const staat = await vergrendel(c, id, verwachteVolgnummer);
   if (staat.onleesbaar) throw ONLEESBAAR();
   const data = decodeer(inhoud, m.maxBytes);
   const sha256 = createHash("sha256").update(data).digest("hex");
+  if (weergave && weergave.formaat === inhoud.formaat) {
+    throw new PlatformFout(400, "verzoek-ongeldig", "Een weergave heeft een ander formaat dan de versie zelf.");
+  }
+  const wData = weergave ? decodeer(weergave, m.maxBytes) : null;
+  const wSha = wData ? createHash("sha256").update(wData).digest("hex") : null;
+  // Een docx of odt verschilt bij elke export; vergelijk dan de weergave.
+  const vergelijk = wSha ?? sha256;
 
   const laatste = await c.query(
-    "SELECT nummer, sha256 FROM versies WHERE object = $1 ORDER BY nummer DESC LIMIT 1",
+    "SELECT nummer, COALESCE(vergelijk_sha256, sha256) AS vergelijk FROM versies WHERE object = $1 ORDER BY nummer DESC LIMIT 1",
     [id],
   );
-  if (laatste.rowCount && laatste.rows[0].sha256 === sha256) {
+  if (laatste.rowCount && laatste.rows[0].vergelijk === vergelijk) {
     // Ongewijzigde inhoud: geen nieuwe versie, geen gebeurtenis.
     return leesObject(c, id);
   }
   const nummer = laatste.rowCount ? laatste.rows[0].nummer + 1 : 1;
   const sleutel = `${id}/${nummer}-${sha256.slice(0, 16)}`;
-  const opTeSlaan = staat.versleuteld
-    ? versleutel(await datasleutel(m, gemeente, id, staat.verpakt), data, `${id}/${nummer}`)
-    : data;
+  const dek = staat.versleuteld ? await datasleutel(m, gemeente, id, staat.verpakt) : null;
+  const opTeSlaan = dek ? versleutel(dek, data, `${id}/${nummer}`) : data;
 
   // Eerst opslaan, dan vastleggen: mislukt de transactie, dan blijft hooguit
   // een wees achter in de opslag, nooit een registratie zonder inhoud.
-  await m.opslag.schrijf(gemeente, sleutel, opTeSlaan, staat.versleuteld ? "application/octet-stream" : inhoud.mediaType);
+  await m.opslag.schrijf(gemeente, sleutel, opTeSlaan, dek ? "application/octet-stream" : inhoud.mediaType);
+  const wSleutel = weergave ? `${id}/${nummer}-${wSha!.slice(0, 16)}.${weergave.formaat}` : null;
+  if (weergave && wData && wSleutel) {
+    const w = dek ? versleutel(dek, wData, `${id}/${nummer}/${weergave.formaat}`) : wData;
+    await m.opslag.schrijf(gemeente, wSleutel, w, dek ? "application/octet-stream" : weergave.mediaType);
+  }
 
   const g = await legGebeurtenisVast(c, gemeente, "versie.vastgelegd", id, actor, {
     nummer,
@@ -316,12 +333,20 @@ export async function voegVersieToe(
     grootte: data.length,
     mediaType: inhoud.mediaType,
     formaat: inhoud.formaat,
+    ...(weergave ? { weergaven: [{ formaat: weergave.formaat, mediaType: weergave.mediaType, sha256: wSha, grootte: wData!.length }] } : {}),
   });
   await c.query(
-    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-    [id, gemeente, nummer, sha256, data.length, inhoud.mediaType, inhoud.formaat, sleutel, g.tijdstip, actor.sub, staat.versleuteld],
+    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld, vergelijk_sha256)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [id, gemeente, nummer, sha256, data.length, inhoud.mediaType, inhoud.formaat, sleutel, g.tijdstip, actor.sub, staat.versleuteld, wSha],
   );
+  if (weergave && wData) {
+    await c.query(
+      `INSERT INTO weergaven (object, gemeente, nummer, formaat, media_type, sha256, grootte, opslagsleutel, versleuteld)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [id, gemeente, nummer, weergave.formaat, weergave.mediaType, wSha, wData.length, wSleutel, staat.versleuteld],
+    );
+  }
   await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
   await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
   return leesObject(c, id);
@@ -356,6 +381,39 @@ export async function leesInhoud(
   const sha = createHash("sha256").update(data).digest("hex");
   if (sha !== v.sha256) throw new PlatformFout(500, "integriteit", "De opgeslagen inhoud wijkt af van de registratie.");
   return { data, mediaType: v.media_type, formaat: v.formaat };
+}
+
+/** Leest een weergave van een versie (bijvoorbeeld de html), ontsleutelt en controleert. */
+export async function leesWeergave(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  id: string,
+  nummer: number,
+  formaat: string,
+): Promise<{ data: Buffer; mediaType: string; formaat: string }> {
+  const r = await c.query(
+    `SELECT w.*, o.sleutel_verpakt, o.onleesbaar_gemaakt FROM weergaven w JOIN objecten o ON o.identificatie = w.object
+      WHERE w.object = $1 AND w.nummer = $2 AND w.formaat = $3`,
+    [id, nummer, formaat],
+  );
+  if (r.rowCount === 0) throw new PlatformFout(404, "weergave-onbekend", "Deze versie heeft geen weergave in dit formaat.");
+  const w = r.rows[0];
+  if (w.onleesbaar_gemaakt) throw ONLEESBAAR();
+  const opgeslagen = await m.opslag.lees(gemeente, w.opslagsleutel);
+  let data = opgeslagen;
+  if (w.versleuteld) {
+    try {
+      data = ontsleutel(await datasleutel(m, gemeente, id, w.sleutel_verpakt), opgeslagen, `${id}/${nummer}/${formaat}`);
+    } catch (e) {
+      if (e instanceof PlatformFout) throw e;
+      throw new PlatformFout(500, "integriteit", "De versleutelde weergave is niet te ontsleutelen.");
+    }
+  }
+  if (createHash("sha256").update(data).digest("hex") !== w.sha256) {
+    throw new PlatformFout(500, "integriteit", "De opgeslagen weergave wijkt af van de registratie.");
+  }
+  return { data, mediaType: w.media_type, formaat: w.formaat };
 }
 
 /**

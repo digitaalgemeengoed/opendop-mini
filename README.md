@@ -9,6 +9,7 @@ Een **minimaal platform** voor het prototype van de Office Assistent: een kleine
 - **Informatieobjecten** met een identificatie die het platform toekent, los van de plek van het bestand.
 - **Metadata** getoetst tegen een geversioneerd objecttype (JSON Schema). Een object mag onvolledig zijn; wat er staat moet kloppen. Een object houdt de versie van het objecttype waaronder het is vastgelegd.
 - **Versies**: elke nieuwe inhoud een nieuwe versie onder een sleutel die nooit wordt hergebruikt; ongewijzigde inhoud levert geen versie op. Bij het lezen wordt de sha-256 gecontroleerd.
+- **Origineel en weergaven**: de versie is het bestand zoals de werkomgeving het bewaart (docx, odt …). De html waarmee de assistent werkt, gaat mee als weergave (MDTO: een representatie), versleuteld zoals de versie: `GET /objecten/:id/versies/:n/weergaven/html`. Of een versie ongewijzigd is, bepaalt het platform op de weergave, omdat een docx of odt bij elke export anders is. De zoekindex leest de html-weergave.
 - **Event store**: elke vastlegging is een gebeurtenis in een tabel die alleen toevoegen toestaat (afgedwongen met een trigger).
 - **Scheiding per gemeente** met Row Level Security in PostgreSQL. De applicatie verbindt als rol `oa_app`; zonder gemeente-instelling ziet zij geen enkele rij.
 - **Outbox** voor zwaar werk na de transactie, verwerkt door een worker (OA-ADR-003). In fase 1 alleen een lege taak `zoekindex`.

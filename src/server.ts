@@ -8,6 +8,7 @@ import {
   PlatformFout,
   leesGebeurtenissen,
   leesInhoud,
+  leesWeergave,
   leesObject,
   leesObjecttype,
   legMetadataVast,
@@ -28,9 +29,12 @@ interface Context {
  * De Object Service. Alleen de integratielaag roept haar aan; die stelt
  * vast wie er belt en geeft gemeente en actor mee.
  */
+/** Zelfde vorm als de inhoud, zonder $id: één body mag een schema-id maar één keer gebruiken. */
+const { $id: _id, ...WEERGAVE_SCHEMA } = INHOUD_SCHEMA;
+
 export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; dienstsleutel: string; log?: boolean }): FastifyInstance {
   const m = opties.middelen;
-  const app = Fastify({ logger: opties.log ?? true, bodyLimit: Math.ceil(m.maxBytes * 1.4) + 65536 });
+  const app = Fastify({ logger: opties.log ?? true, bodyLimit: Math.ceil(m.maxBytes * 2.8) + 65536 });
   const sleutel = Buffer.from(opties.dienstsleutel);
 
   function context(req: FastifyRequest): Context {
@@ -113,14 +117,14 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
 
   // --- Informatieobjecten ---------------------------------------------------
 
-  app.post<{ Body: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud } }>(
+  app.post<{ Body: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud } }>(
     "/objecten",
     {
       schema: {
         body: {
           type: "object",
           required: ["objecttype"],
-          properties: { objecttype: { type: "string" }, metadata: { type: "object" }, inhoud: INHOUD_SCHEMA },
+          properties: { objecttype: { type: "string" }, metadata: { type: "object" }, inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA },
         },
       },
     },
@@ -163,21 +167,21 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; verwachteVolgnummer?: number } }>(
+  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; weergave?: Inhoud; verwachteVolgnummer?: number } }>(
     "/objecten/:id/versies",
     {
       schema: {
         body: {
           type: "object",
           required: ["inhoud"],
-          properties: { inhoud: INHOUD_SCHEMA, verwachteVolgnummer: { type: "integer" } },
+          properties: { inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA, verwachteVolgnummer: { type: "integer" } },
         },
       },
     },
     async (req, antwoord) => {
       const { gemeente, actor } = context(req);
       const o = await inGemeente(gemeente, (c) =>
-        voegVersieToe(c, m, gemeente, actor, req.params.id, req.body.inhoud, req.body.verwachteVolgnummer),
+        voegVersieToe(c, m, gemeente, actor, req.params.id, req.body.inhoud, req.body.verwachteVolgnummer, req.body.weergave),
       );
       return antwoord.status(201).send(o);
     },
@@ -186,6 +190,12 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
   app.get<{ Params: { id: string; nummer: string } }>("/objecten/:id/versies/:nummer/inhoud", async (req, antwoord) => {
     const { gemeente } = context(req);
     const r = await inGemeente(gemeente, (c) => leesInhoud(c, m, gemeente, req.params.id, Number(req.params.nummer)));
+    return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
+  });
+
+  app.get<{ Params: { id: string; nummer: string; formaat: string } }>("/objecten/:id/versies/:nummer/weergaven/:formaat", async (req, antwoord) => {
+    const { gemeente } = context(req);
+    const r = await inGemeente(gemeente, (c) => leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat));
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
 

@@ -11,14 +11,20 @@ import {
 import { config } from "./config.js";
 
 /**
+ * Waar een stuk staat: zakelijk in de bucket van de gemeente (archief, met
+ * Object Lock), persoonlijk in een eigen bucket zonder Object Lock.
+ */
+export type Ruimte = "zakelijk" | "persoonlijk";
+
+/**
  * Opslag van representaties. Het platform schrijft elke versie als nieuw
  * object onder een sleutel die nooit wordt hergebruikt.
  */
 export interface Opslag {
-  schrijf(gemeente: string, sleutel: string, data: Buffer, mediaType: string): Promise<void>;
-  lees(gemeente: string, sleutel: string): Promise<Buffer>;
+  schrijf(gemeente: string, sleutel: string, data: Buffer, mediaType: string, ruimte?: Ruimte): Promise<void>;
+  lees(gemeente: string, sleutel: string, ruimte?: Ruimte): Promise<Buffer>;
   /** Zorgt dat de opslag voor deze gemeente bestaat. */
-  bereidVoor(gemeente: string): Promise<void>;
+  bereidVoor(gemeente: string, ruimte?: Ruimte): Promise<void>;
   readonly soort: string;
 }
 
@@ -27,19 +33,19 @@ export class LokaleOpslag implements Opslag {
   readonly soort = "lokaal";
   constructor(private readonly basis: string) {}
 
-  private pad(gemeente: string, sleutel: string): string {
-    const wortel = resolve(this.basis, gemeente);
+  private pad(gemeente: string, sleutel: string, ruimte: Ruimte = "zakelijk"): string {
+    const wortel = resolve(this.basis, ruimte === "persoonlijk" ? `${gemeente}-persoonlijk` : gemeente);
     const p = resolve(wortel, sleutel);
     if (!p.startsWith(wortel + "/")) throw new Error("Ongeldige opslagsleutel");
     return p;
   }
 
-  async bereidVoor(gemeente: string): Promise<void> {
-    await mkdir(join(this.basis, gemeente), { recursive: true });
+  async bereidVoor(gemeente: string, ruimte: Ruimte = "zakelijk"): Promise<void> {
+    await mkdir(join(this.basis, ruimte === "persoonlijk" ? `${gemeente}-persoonlijk` : gemeente), { recursive: true });
   }
 
-  async schrijf(gemeente: string, sleutel: string, data: Buffer): Promise<void> {
-    const p = this.pad(gemeente, sleutel);
+  async schrijf(gemeente: string, sleutel: string, data: Buffer, _mediaType?: string, ruimte: Ruimte = "zakelijk"): Promise<void> {
+    const p = this.pad(gemeente, sleutel, ruimte);
     await mkdir(dirname(p), { recursive: true });
     try {
       await access(p);
@@ -50,8 +56,8 @@ export class LokaleOpslag implements Opslag {
     await writeFile(p, data, { flag: "wx" });
   }
 
-  async lees(gemeente: string, sleutel: string): Promise<Buffer> {
-    return readFile(this.pad(gemeente, sleutel));
+  async lees(gemeente: string, sleutel: string, ruimte: Ruimte = "zakelijk"): Promise<Buffer> {
+    return readFile(this.pad(gemeente, sleutel, ruimte));
   }
 }
 
@@ -59,7 +65,8 @@ export class LokaleOpslag implements Opslag {
  * S3-opslag (SILO of een andere S3 met Object Lock). Eén bucket per gemeente, aangemaakt met versiebeheer
  * en Object Lock: dat kan alleen bij het aanmaken van de bucket (OA-ADR-005).
  * Bewaartermijnen worden in het prototype nog niet gezet; de archieffuncties
- * zijn gesimuleerd.
+ * zijn gesimuleerd. Persoonlijke stukken staan in een tweede bucket per
+ * gemeente ("-persoonlijk"), zonder Object Lock: die vallen buiten het archief.
  */
 export class S3Opslag implements Opslag {
   readonly soort = "s3";
@@ -75,34 +82,39 @@ export class S3Opslag implements Opslag {
     });
   }
 
-  private bucket(gemeente: string): string {
-    return `${config.opslag.bucketVoorvoegsel}${gemeente}`;
+  private bucket(gemeente: string, ruimte: Ruimte = "zakelijk"): string {
+    return `${config.opslag.bucketVoorvoegsel}${gemeente}${ruimte === "persoonlijk" ? "-persoonlijk" : ""}`;
   }
 
-  async bereidVoor(gemeente: string): Promise<void> {
-    if (this.voorbereid.has(gemeente)) return;
-    const Bucket = this.bucket(gemeente);
+  async bereidVoor(gemeente: string, ruimte: Ruimte = "zakelijk"): Promise<void> {
+    const Bucket = this.bucket(gemeente, ruimte);
+    if (this.voorbereid.has(Bucket)) return;
     try {
       await this.client.send(new HeadBucketCommand({ Bucket }));
     } catch {
-      await this.client.send(new CreateBucketCommand({ Bucket, ObjectLockEnabledForBucket: true }));
-      // Object Lock aan, nog zonder standaardbewaartermijn.
-      await this.client.send(
-        new PutObjectLockConfigurationCommand({ Bucket, ObjectLockConfiguration: { ObjectLockEnabled: "Enabled" } }),
-      );
+      if (ruimte === "persoonlijk") {
+        // Buiten het archief: geen Object Lock.
+        await this.client.send(new CreateBucketCommand({ Bucket }));
+      } else {
+        await this.client.send(new CreateBucketCommand({ Bucket, ObjectLockEnabledForBucket: true }));
+        // Object Lock aan, nog zonder standaardbewaartermijn.
+        await this.client.send(
+          new PutObjectLockConfigurationCommand({ Bucket, ObjectLockConfiguration: { ObjectLockEnabled: "Enabled" } }),
+        );
+      }
     }
-    this.voorbereid.add(gemeente);
+    this.voorbereid.add(Bucket);
   }
 
-  async schrijf(gemeente: string, sleutel: string, data: Buffer, mediaType: string): Promise<void> {
-    await this.bereidVoor(gemeente);
+  async schrijf(gemeente: string, sleutel: string, data: Buffer, mediaType: string, ruimte: Ruimte = "zakelijk"): Promise<void> {
+    await this.bereidVoor(gemeente, ruimte);
     await this.client.send(
-      new PutObjectCommand({ Bucket: this.bucket(gemeente), Key: sleutel, Body: data, ContentType: mediaType, IfNoneMatch: "*" }),
+      new PutObjectCommand({ Bucket: this.bucket(gemeente, ruimte), Key: sleutel, Body: data, ContentType: mediaType, IfNoneMatch: "*" }),
     );
   }
 
-  async lees(gemeente: string, sleutel: string): Promise<Buffer> {
-    const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket(gemeente), Key: sleutel }));
+  async lees(gemeente: string, sleutel: string, ruimte: Ruimte = "zakelijk"): Promise<Buffer> {
+    const r = await this.client.send(new GetObjectCommand({ Bucket: this.bucket(gemeente, ruimte), Key: sleutel }));
     return Buffer.from(await r.Body!.transformToByteArray());
   }
 }

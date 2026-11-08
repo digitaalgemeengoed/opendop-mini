@@ -18,6 +18,8 @@ import {
   publiceerObjecttype,
   voegVersieToe,
   type Middelen,
+  toetsToegang,
+  wijzigAard,
 } from "./objecten.js";
 
 interface Context {
@@ -117,14 +119,20 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
 
   // --- Informatieobjecten ---------------------------------------------------
 
-  app.post<{ Body: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud } }>(
+  app.post<{ Body: { objecttype: string; aard?: "zakelijk" | "persoonlijk"; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud } }>(
     "/objecten",
     {
       schema: {
         body: {
           type: "object",
           required: ["objecttype"],
-          properties: { objecttype: { type: "string" }, metadata: { type: "object" }, inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA },
+          properties: {
+            objecttype: { type: "string" },
+            aard: { enum: ["zakelijk", "persoonlijk"] },
+            metadata: { type: "object" },
+            inhoud: INHOUD_SCHEMA,
+            weergave: WEERGAVE_SCHEMA,
+          },
         },
       },
     },
@@ -135,18 +143,35 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
   );
 
+  // Elke aanroep op één object toetst eerst of de actor het mag zien: een
+  // persoonlijk stuk alleen wie het vastlegde (toetsToegang).
   app.get<{ Params: { id: string } }>("/objecten/:id", async (req) => {
-    const { gemeente } = context(req);
-    return inGemeente(gemeente, (c) => leesObject(c, req.params.id));
+    const { gemeente, actor } = context(req);
+    return inGemeente(gemeente, async (c) => {
+      await toetsToegang(c, req.params.id, actor);
+      return leesObject(c, req.params.id);
+    });
   });
 
   app.get<{ Params: { id: string } }>("/objecten/:id/gebeurtenissen", async (req) => {
-    const { gemeente } = context(req);
+    const { gemeente, actor } = context(req);
     return inGemeente(gemeente, async (c) => {
-      await leesObject(c, req.params.id);
+      await toetsToegang(c, req.params.id, actor);
       return leesGebeurtenissen(c, req.params.id);
     });
   });
+
+  app.put<{ Params: { id: string }; Body: { aard: "zakelijk" | "persoonlijk" } }>(
+    "/objecten/:id/aard",
+    { schema: { body: { type: "object", required: ["aard"], properties: { aard: { enum: ["zakelijk", "persoonlijk"] } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return wijzigAard(c, m, gemeente, actor, req.params.id, req.body.aard);
+      });
+    },
+  );
 
   app.put<{ Params: { id: string }; Body: { metadata: Record<string, unknown>; verwachteVolgnummer?: number } }>(
     "/objecten/:id/metadata",
@@ -161,9 +186,10 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
     async (req) => {
       const { gemeente, actor } = context(req);
-      return inGemeente(gemeente, (c) =>
-        legMetadataVast(c, gemeente, actor, req.params.id, req.body.metadata, req.body.verwachteVolgnummer),
-      );
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return legMetadataVast(c, gemeente, actor, req.params.id, req.body.metadata, req.body.verwachteVolgnummer);
+      });
     },
   );
 
@@ -180,22 +206,29 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
     async (req, antwoord) => {
       const { gemeente, actor } = context(req);
-      const o = await inGemeente(gemeente, (c) =>
-        voegVersieToe(c, m, gemeente, actor, req.params.id, req.body.inhoud, req.body.verwachteVolgnummer, req.body.weergave),
-      );
+      const o = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return voegVersieToe(c, m, gemeente, actor, req.params.id, req.body.inhoud, req.body.verwachteVolgnummer, req.body.weergave);
+      });
       return antwoord.status(201).send(o);
     },
   );
 
   app.get<{ Params: { id: string; nummer: string } }>("/objecten/:id/versies/:nummer/inhoud", async (req, antwoord) => {
-    const { gemeente } = context(req);
-    const r = await inGemeente(gemeente, (c) => leesInhoud(c, m, gemeente, req.params.id, Number(req.params.nummer)));
+    const { gemeente, actor } = context(req);
+    const r = await inGemeente(gemeente, async (c) => {
+      await toetsToegang(c, req.params.id, actor);
+      return leesInhoud(c, m, gemeente, req.params.id, Number(req.params.nummer));
+    });
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
 
   app.get<{ Params: { id: string; nummer: string; formaat: string } }>("/objecten/:id/versies/:nummer/weergaven/:formaat", async (req, antwoord) => {
-    const { gemeente } = context(req);
-    const r = await inGemeente(gemeente, (c) => leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat));
+    const { gemeente, actor } = context(req);
+    const r = await inGemeente(gemeente, async (c) => {
+      await toetsToegang(c, req.params.id, actor);
+      return leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat);
+    });
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
 
@@ -204,7 +237,10 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     { schema: { body: { type: "object", required: ["reden"], properties: { reden: { type: "string", minLength: 10, maxLength: 1000 } } } } },
     async (req) => {
       const { gemeente, actor } = context(req);
-      return inGemeente(gemeente, (c) => maakOnleesbaar(c, m, gemeente, actor, req.params.id, req.body.reden));
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return maakOnleesbaar(c, m, gemeente, actor, req.params.id, req.body.reden);
+      });
     },
   );
 
@@ -241,7 +277,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
             `SELECT o.identificatie, o.objecttype_naam, o.objecttype_versie, o.metadata,
                     (SELECT max(nummer) FROM versies v WHERE v.object = o.identificatie) AS versie
                FROM objecten o
-              WHERE o.identificatie = ANY($1::uuid[]) AND o.onleesbaar_gemaakt IS NULL`,
+              WHERE o.identificatie = ANY($1::uuid[]) AND o.onleesbaar_gemaakt IS NULL AND o.aard = 'zakelijk'`,
             [treffers.map((t) => t.identificatie)],
           )
         ).rows,

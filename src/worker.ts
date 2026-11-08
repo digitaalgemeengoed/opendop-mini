@@ -34,7 +34,8 @@ export function maakVerwerkers(pool: pg.Pool, m: Middelen, zoekindex: Zoekindex)
       if (!id) return;
       const o = await pool.query("SELECT * FROM objecten WHERE identificatie = $1", [id]);
       const obj = o.rows[0];
-      if (!obj || obj.onleesbaar_gemaakt) {
+      // Persoonlijke stukken horen niet in de zoekindex.
+      if (!obj || obj.onleesbaar_gemaakt || obj.aard === "persoonlijk") {
         await zoekindex.verwijder(gemeente, id);
         return;
       }

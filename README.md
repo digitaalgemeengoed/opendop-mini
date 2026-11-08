@@ -13,6 +13,7 @@ Een **minimaal platform** voor het prototype van de Office Assistent: een kleine
 - **Event store**: elke vastlegging is een gebeurtenis in een tabel die alleen toevoegen toestaat (afgedwongen met een trigger).
 - **Scheiding per gemeente** met Row Level Security in PostgreSQL. De applicatie verbindt als rol `oa_app`; zonder gemeente-instelling ziet zij geen enkele rij.
 - **Outbox** voor zwaar werk na de transactie, verwerkt door een worker (OA-ADR-003). In fase 1 alleen een lege taak `zoekindex`.
+- **Zakelijk of persoonlijk** (migratie 004): een persoonlijk stuk heeft geen metadata, staat in een eigen bucket zonder Object Lock (`…-persoonlijk`), komt niet in de zoekindex en is alleen zichtbaar voor wie het vastlegde (voor anderen: 404). `PUT /objecten/:id/aard` maakt het zakelijk: kopie in het archief, dan in de index. Andersom kan nog niet; dat volgt met de bedenktijd.
 - **Gelijktijdig werken**: wie vastlegt met `verwachteVolgnummer` krijgt 409 als het object intussen is gewijzigd.
 
 Alleen de integratielaag mag het platform aanroepen (gedeelde dienstsleutel; in productie mTLS). De gemeente en de actor komen van de integratielaag.

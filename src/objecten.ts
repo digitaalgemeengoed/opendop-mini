@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   Actor,
+  Aard,
   Gebeurtenis,
   Gebeurtenistype,
   Inhoud,
@@ -150,9 +151,11 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
   const weergavenVan = (nummer: number): Weergave[] =>
     w.rows.filter((x) => x.nummer === nummer).map((x) => ({ formaat: x.formaat, mediaType: x.media_type, grootte: Number(x.grootte), sha256: x.sha256 }));
   const type = await leesObjecttype(c, o.objecttype_naam, o.objecttype_versie);
-  const t = toets(`${type.naam}@${type.versie}`, type.schema, o.metadata);
+  // Een persoonlijk stuk heeft geen metadata: dan is er ook niets onvolledig.
+  const t = o.aard === "persoonlijk" ? { ontbreekt: [] as string[] } : toets(`${type.naam}@${type.versie}`, type.schema, o.metadata);
   return {
     identificatie: o.identificatie,
+    aard: o.aard,
     gemeente: o.gemeente,
     objecttype: { naam: o.objecttype_naam, versie: o.objecttype_versie },
     metadata: o.metadata,
@@ -191,12 +194,14 @@ export async function maakObject(
   m: Middelen,
   gemeente: string,
   actor: Actor,
-  vraag: { objecttype: string; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud },
+  vraag: { objecttype: string; aard?: Aard; metadata?: Record<string, unknown>; inhoud?: Inhoud; weergave?: Inhoud },
 ): Promise<ObjectMetStaat> {
   const type = await leesObjecttype(c, vraag.objecttype);
+  const aard: Aard = vraag.aard ?? "zakelijk";
   const metadata = vraag.metadata ?? {};
-  const t = toets(`${type.naam}@${type.versie}`, type.schema, metadata);
-  weigerOngeldig(t);
+  if (aard === "persoonlijk") {
+    if (Object.keys(metadata).length) throw GEEN_METADATA();
+  } else weigerOngeldig(toets(`${type.naam}@${type.versie}`, type.schema, metadata));
 
   const id = randomUUID();
   // De sleutel bestaat vóór de registratie; mislukt de transactie, dan blijft
@@ -204,23 +209,29 @@ export async function maakObject(
   const verpakt = m.sleutelbeheer ? await m.sleutelbeheer.maakObjectsleutel(gemeente, id) : null;
   const g = await legGebeurtenisVast(c, gemeente, "object.aangemaakt", id, actor, {
     objecttype: { naam: type.naam, versie: type.versie },
+    aard,
     metadata,
     versleuteld: verpakt !== null,
   });
   await c.query(
     `INSERT INTO objecten (identificatie, gemeente, objecttype_naam, objecttype_versie, metadata,
-                           laatste_volgnummer, aangemaakt, aangemaakt_door, versleuteld, sleutel_verpakt)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [id, gemeente, type.naam, type.versie, metadata, g.volgnummer, g.tijdstip, actor.sub, verpakt !== null, verpakt],
+                           laatste_volgnummer, aangemaakt, aangemaakt_door, versleuteld, sleutel_verpakt, aard)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [id, gemeente, type.naam, type.versie, metadata, g.volgnummer, g.tijdstip, actor.sub, verpakt !== null, verpakt, aard],
   );
-  await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
+  // Persoonlijke stukken gaan niet in de zoekindex.
+  if (aard === "zakelijk") await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
   if (vraag.inhoud) await voegVersieToe(c, m, gemeente, actor, id, vraag.inhoud, undefined, vraag.weergave);
   return leesObject(c, id);
 }
 
-async function vergrendel(c: Client, id: string, verwacht?: number): Promise<{ versleuteld: boolean; verpakt: string | null; onleesbaar: boolean }> {
+async function vergrendel(
+  c: Client,
+  id: string,
+  verwacht?: number,
+): Promise<{ versleuteld: boolean; verpakt: string | null; onleesbaar: boolean; aard: Aard }> {
   const r = await c.query(
-    "SELECT laatste_volgnummer, versleuteld, sleutel_verpakt, onleesbaar_gemaakt FROM objecten WHERE identificatie = $1 FOR UPDATE",
+    "SELECT laatste_volgnummer, versleuteld, sleutel_verpakt, onleesbaar_gemaakt, aard FROM objecten WHERE identificatie = $1 FOR UPDATE",
     [id],
   );
   if (r.rowCount === 0) throw new PlatformFout(404, "object-onbekend", "Dit object bestaat niet.");
@@ -231,7 +242,22 @@ async function vergrendel(c: Client, id: string, verwacht?: number): Promise<{ v
       huidig,
     });
   }
-  return { versleuteld: r.rows[0].versleuteld, verpakt: r.rows[0].sleutel_verpakt, onleesbaar: !!r.rows[0].onleesbaar_gemaakt };
+  return { versleuteld: r.rows[0].versleuteld, verpakt: r.rows[0].sleutel_verpakt, onleesbaar: !!r.rows[0].onleesbaar_gemaakt, aard: r.rows[0].aard };
+}
+
+const GEEN_METADATA = () =>
+  new PlatformFout(409, "persoonlijk-geen-metadata", "Een persoonlijk stuk heeft geen metadata. Maak het eerst zakelijk.");
+
+/**
+ * Een persoonlijk stuk is alleen zichtbaar voor wie het vastlegde. Voor
+ * anderen bestaat het niet (404): ook het bestaan blijft persoonlijk.
+ */
+export async function toetsToegang(c: Client, id: string, actor: Actor): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new PlatformFout(404, "object-onbekend", "Dit object bestaat niet.");
+  const r = await c.query("SELECT aard, aangemaakt_door FROM objecten WHERE identificatie = $1", [id]);
+  if (r.rowCount === 0 || (r.rows[0].aard === "persoonlijk" && r.rows[0].aangemaakt_door !== actor.sub)) {
+    throw new PlatformFout(404, "object-onbekend", "Dit object bestaat niet.");
+  }
 }
 
 export async function legMetadataVast(
@@ -242,7 +268,8 @@ export async function legMetadataVast(
   metadata: Record<string, unknown>,
   verwachteVolgnummer?: number,
 ): Promise<ObjectMetStaat> {
-  await vergrendel(c, id, verwachteVolgnummer);
+  const staat = await vergrendel(c, id, verwachteVolgnummer);
+  if (staat.aard === "persoonlijk") throw GEEN_METADATA();
   const huidig = await leesObject(c, id);
   const type = await leesObjecttype(c, huidig.objecttype.naam, huidig.objecttype.versie);
   weigerOngeldig(toets(`${type.naam}@${type.versie}`, type.schema, metadata));
@@ -320,11 +347,12 @@ export async function voegVersieToe(
 
   // Eerst opslaan, dan vastleggen: mislukt de transactie, dan blijft hooguit
   // een wees achter in de opslag, nooit een registratie zonder inhoud.
-  await m.opslag.schrijf(gemeente, sleutel, opTeSlaan, dek ? "application/octet-stream" : inhoud.mediaType);
+  const ruimte = staat.aard;
+  await m.opslag.schrijf(gemeente, sleutel, opTeSlaan, dek ? "application/octet-stream" : inhoud.mediaType, ruimte);
   const wSleutel = weergave ? `${id}/${nummer}-${wSha!.slice(0, 16)}.${weergave.formaat}` : null;
   if (weergave && wData && wSleutel) {
     const w = dek ? versleutel(dek, wData, `${id}/${nummer}/${weergave.formaat}`) : wData;
-    await m.opslag.schrijf(gemeente, wSleutel, w, dek ? "application/octet-stream" : weergave.mediaType);
+    await m.opslag.schrijf(gemeente, wSleutel, w, dek ? "application/octet-stream" : weergave.mediaType, ruimte);
   }
 
   const g = await legGebeurtenisVast(c, gemeente, "versie.vastgelegd", id, actor, {
@@ -336,18 +364,57 @@ export async function voegVersieToe(
     ...(weergave ? { weergaven: [{ formaat: weergave.formaat, mediaType: weergave.mediaType, sha256: wSha, grootte: wData!.length }] } : {}),
   });
   await c.query(
-    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld, vergelijk_sha256)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-    [id, gemeente, nummer, sha256, data.length, inhoud.mediaType, inhoud.formaat, sleutel, g.tijdstip, actor.sub, staat.versleuteld, wSha],
+    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld, vergelijk_sha256, ruimte)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    [id, gemeente, nummer, sha256, data.length, inhoud.mediaType, inhoud.formaat, sleutel, g.tijdstip, actor.sub, staat.versleuteld, wSha, ruimte],
   );
   if (weergave && wData) {
     await c.query(
-      `INSERT INTO weergaven (object, gemeente, nummer, formaat, media_type, sha256, grootte, opslagsleutel, versleuteld)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [id, gemeente, nummer, weergave.formaat, weergave.mediaType, wSha, wData.length, wSleutel, staat.versleuteld],
+      `INSERT INTO weergaven (object, gemeente, nummer, formaat, media_type, sha256, grootte, opslagsleutel, versleuteld, ruimte)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [id, gemeente, nummer, weergave.formaat, weergave.mediaType, wSha, wData.length, wSleutel, staat.versleuteld, ruimte],
     );
   }
   await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
+  if (staat.aard === "zakelijk") await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
+  return leesObject(c, id);
+}
+
+/**
+ * Een persoonlijk stuk zakelijk maken: dat kan altijd. Alle versies en
+ * weergaven komen als kopie in de bucket van de gemeente (het archief); de
+ * registratie wijst daarna daarheen. Metadata volgt via Metadateren; tot dan
+ * heet het stuk onvolledig. In het prototype blijft de persoonlijke kopie
+ * staan; opruimen volgt.
+ *
+ * Andersom (zakelijk naar persoonlijk) kan hier nog niet: straks binnen de
+ * bedenktijd, of op verzoek bij de informatiebeheerder.
+ */
+export async function wijzigAard(c: Client, m: Middelen, gemeente: string, actor: Actor, id: string, aard: Aard): Promise<ObjectMetStaat> {
+  const staat = await vergrendel(c, id);
+  if (staat.aard === aard) return leesObject(c, id);
+  if (aard === "persoonlijk") {
+    throw new PlatformFout(
+      409,
+      "persoonlijk-niet-toegestaan",
+      "Een zakelijk stuk persoonlijk maken kan in het prototype nog niet. Straks kan dat binnen de bedenktijd, of op verzoek bij de informatiebeheerder.",
+    );
+  }
+  for (const tabel of ["versies", "weergaven"] as const) {
+    const r = await c.query(`SELECT opslagsleutel, media_type, versleuteld FROM ${tabel} WHERE object = $1 AND ruimte = 'persoonlijk'`, [id]);
+    for (const rij of r.rows) {
+      const data = await m.opslag.lees(gemeente, rij.opslagsleutel, "persoonlijk");
+      try {
+        await m.opslag.schrijf(gemeente, rij.opslagsleutel, data, rij.versleuteld ? "application/octet-stream" : rij.media_type, "zakelijk");
+      } catch (e) {
+        // Al gekopieerd bij een eerdere poging die daarna mislukte: zelfde sleutel, zelfde inhoud.
+        if (!/bestaat al|PreconditionFailed|412/i.test(String((e as Error).message ?? e))) throw e;
+      }
+    }
+    await c.query(`UPDATE ${tabel} SET ruimte = 'zakelijk' WHERE object = $1`, [id]);
+  }
+  const g = await legGebeurtenisVast(c, gemeente, "aard.gewijzigd", id, actor, { van: staat.aard, naar: aard });
+  await c.query("UPDATE objecten SET aard = $2, laatste_volgnummer = $3 WHERE identificatie = $1", [id, aard, g.volgnummer]);
   await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
   return leesObject(c, id);
 }
@@ -368,7 +435,7 @@ export async function leesInhoud(
   if (r.rowCount === 0) throw new PlatformFout(404, "versie-onbekend", "Deze versie bestaat niet.");
   const v = r.rows[0];
   if (v.onleesbaar_gemaakt) throw ONLEESBAAR();
-  const opgeslagen = await m.opslag.lees(gemeente, v.opslagsleutel);
+  const opgeslagen = await m.opslag.lees(gemeente, v.opslagsleutel, v.ruimte);
   let data = opgeslagen;
   if (v.versleuteld) {
     try {
@@ -400,7 +467,7 @@ export async function leesWeergave(
   if (r.rowCount === 0) throw new PlatformFout(404, "weergave-onbekend", "Deze versie heeft geen weergave in dit formaat.");
   const w = r.rows[0];
   if (w.onleesbaar_gemaakt) throw ONLEESBAAR();
-  const opgeslagen = await m.opslag.lees(gemeente, w.opslagsleutel);
+  const opgeslagen = await m.opslag.lees(gemeente, w.opslagsleutel, w.ruimte);
   let data = opgeslagen;
   if (w.versleuteld) {
     try {

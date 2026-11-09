@@ -161,7 +161,8 @@ export async function registreerPii(
       uit.push({ plaatshouder: bestaand.rows[0].plaatshouder, soort: i.soort, categorie: bestaand.rows[0].categorie, nieuw: false });
       continue;
     }
-    const cat = info.categorie;
+    const cat = i.categorie ?? info.categorie;
+    if (!PII_CATEGORIE[cat]) throw new PlatformFout(400, "verzoek-ongeldig", `Onbekende categorie: ${cat}`);
     if (!sleutels.has(cat)) sleutels.set(cat, await sleutelVoor(c, m, gemeente, id, cat, cat !== "c3"));
     const s = sleutels.get(cat)!;
     // Het hoogste nummer plus één (een vervallen voorvertoning laat een gat, of geeft haar nummer vrij).
@@ -215,6 +216,53 @@ export async function vervallenPii(c: Client, id: string, actor: Actor, plaatsho
   await vergrendel(c, id);
   await c.query("DELETE FROM pii_register WHERE object = $1 AND plaatshouder = ANY($2) AND status = 'voorvertoning'", [id, plaatshouders]);
   return leesPiiRegister(c, id, actor);
+}
+
+/**
+ * Een andere grondslag (AVG-categorie) voor een voorvertoning: de waarde gaat
+ * over naar de sleutel van de nieuwe categorie, de plaatshouder blijft. Wie
+ * dat doet, moet het origineel kunnen lezen (het niveau van de oude
+ * categorie). Na bevestigen kan het niet meer: dan zit het gegeven in een
+ * vastgelegde versie; terugzetten en opnieuw anonimiseren kan wel.
+ */
+export async function wijzigCategoriePii(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  actor: Actor,
+  id: string,
+  plaatshouder: string,
+  naar: PiiCategorie,
+): Promise<{ plaatshouder: string; soort: PiiSoort; categorie: PiiCategorie }> {
+  zonderSleutelbeheer(m);
+  await vergrendel(c, id);
+  if (!PII_CATEGORIE[naar]) throw new PlatformFout(400, "verzoek-ongeldig", `Onbekende categorie: ${naar}`);
+  const r = await c.query("SELECT soort, categorie, cijfertekst, status, zoeksleutel, bron, versie, vastgelegd, door FROM pii_register WHERE object = $1 AND plaatshouder = $2", [id, plaatshouder]);
+  if (!r.rowCount) throw new PlatformFout(404, "pii-onbekend", "Deze plaatshouder staat niet in het register van dit stuk.");
+  const x = r.rows[0];
+  const van = x.categorie as PiiCategorie;
+  if (van === naar) return { plaatshouder, soort: x.soort, categorie: van };
+  if (x.status !== "voorvertoning") {
+    throw new PlatformFout(409, "pii-bevestigd", "De grondslag van een bevestigd gegeven ligt vast. Zet het terug en anonimiseer het opnieuw met de juiste grondslag.");
+  }
+  const niveau = niveauVan(actor);
+  if (niveau < PII_CATEGORIE[van].ppl) {
+    throw new PlatformFout(403, "pii-niveau", `Om de grondslag te wijzigen moet je het origineel kunnen lezen: ${PII_CATEGORIE[van].omschrijving} vragen PPL ${PII_CATEGORIE[van].ppl}, jij hebt PPL ${niveau}.`);
+  }
+  const oud = await sleutelVoor(c, m, gemeente, id, van, true);
+  const nieuw = await sleutelVoor(c, m, gemeente, id, naar, naar !== "c3");
+  const waarde = ontsleutelWaarde(oud, id, plaatshouder, x.cijfertekst);
+  // Weghalen en opnieuw toevoegen (in dezelfde transactie): de app mag een
+  // regel alleen bijwerken in haar status, en alleen een voorvertoning weghalen.
+  await c.query("DELETE FROM pii_register WHERE object = $1 AND plaatshouder = $2 AND status = 'voorvertoning'", [id, plaatshouder]);
+  await c.query(
+    `INSERT INTO pii_register (object, gemeente, plaatshouder, soort, categorie, algoritme, cijfertekst, zoeksleutel, bron, versie, vastgelegd, door, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'voorvertoning')`,
+    [id, gemeente, plaatshouder, x.soort, naar, PII_CATEGORIE[naar].algoritme, versleutelWaarde(nieuw, id, plaatshouder, waarde), x.zoeksleutel, x.bron, x.versie, x.vastgelegd, x.door],
+  );
+  const g = await legGebeurtenisVast(c, gemeente, "pii.categorie-gewijzigd", id, actor, { plaatshouder, van, naar });
+  await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
+  return { plaatshouder, soort: x.soort, categorie: naar };
 }
 
 /**

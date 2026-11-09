@@ -1,5 +1,13 @@
 # Wijzigingen
 
+## 0.7.2 — 2026-11-09
+
+**De grondslag van een persoonsgegeven aanpassen.**
+
+- `POST /objecten/:id/pii/categorie` (`plaatshouder`, `categorie`): een voorvertoning in een andere AVG-categorie. De waarde gaat over naar de sleutel van die categorie; de plaatshouder blijft. Je moet het origineel kunnen lezen (het niveau van de oude categorie). Na bevestigen ligt de grondslag vast (409). Gebeurtenis `pii.categorie-gewijzigd` (plaatshouder, van, naar; zonder waarde).
+- Registreren kan meteen met een andere categorie (`items[].categorie`).
+- Geen nieuwe rechten in de database: wijzigen is weghalen en opnieuw toevoegen in één transactie, binnen de regels van migratie 007.
+
 ## 0.7.1 — 2026-11-09
 
 `/gezondheid` noemt de versie van het platform (voor de overzichtspagina).

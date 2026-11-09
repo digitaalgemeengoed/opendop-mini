@@ -32,7 +32,7 @@ import {
   wijzigAard,
   legAnonimiseringVast,
 } from "./objecten.js";
-import { bevestigPii, leesPiiRegister, onthulPii, registreerPii, terugzettenPii, toetsVersieMetPii, vernietigPii, vervallenPii, zetVersieTerug } from "./piiregister.js";
+import { bevestigPii, leesPiiRegister, onthulPii, registreerPii, terugzettenPii, toetsVersieMetPii, vernietigPii, vervallenPii, wijzigCategoriePii, zetVersieTerug } from "./piiregister.js";
 
 interface Context {
   gemeente: string;
@@ -287,7 +287,12 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
               items: {
                 type: "object",
                 required: ["soort", "waarde", "bron"],
-                properties: { soort: { type: "string", maxLength: 40 }, waarde: { type: "string", minLength: 1, maxLength: 2000 }, bron: { enum: ["model", "patroon", "medewerker"] } },
+                properties: {
+                  soort: { type: "string", maxLength: 40 },
+                  waarde: { type: "string", minLength: 1, maxLength: 2000 },
+                  bron: { enum: ["model", "patroon", "medewerker"] },
+                  categorie: { enum: ["c1", "c2", "c3"] },
+                },
               },
             },
             voorvertoning: { type: "boolean" },
@@ -334,6 +339,22 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
       return inGemeente(gemeente, async (c) => {
         await toetsToegang(c, req.params.id, actor);
         return vervallenPii(c, req.params.id, actor, req.body.plaatshouders);
+      });
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { plaatshouder: string; categorie: "c1" | "c2" | "c3" } }>(
+    "/objecten/:id/pii/categorie",
+    {
+      schema: {
+        body: { type: "object", required: ["plaatshouder", "categorie"], properties: { plaatshouder: { type: "string", maxLength: 60 }, categorie: { enum: ["c1", "c2", "c3"] } } },
+      },
+    },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return wijzigCategoriePii(c, m, gemeente, actor, req.params.id, req.body.plaatshouder, req.body.categorie);
       });
     },
   );

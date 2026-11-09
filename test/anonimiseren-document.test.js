@@ -75,6 +75,32 @@ test("laat staan: een voorvertoning vervalt en haar nummer komt vrij", { skip: o
   assert.deepEqual(b.json().plaatshouders.map((p) => p.plaatshouder), ["[ADRES 1]", "[PERSOON 2]"]);
 });
 
+test("grondslag: een voorvertoning in een andere categorie, met het origineel onder de nieuwe sleutel", { skip: overslaan }, async () => {
+  const a = await vraag("POST", "/pii", { voorvertoning: true, items: [{ soort: "overig", waarde: "depressie", bron: "medewerker" }] });
+  assert.deepEqual(a.json().plaatshouders.map((p) => [p.plaatshouder, p.categorie]), [["[OVERIG 1]", "c1"]]);
+  // Meteen met een andere categorie registreren kan ook.
+  const b = await vraag("POST", "/pii", { voorvertoning: true, items: [{ soort: "naam", waarde: "Piet Veroordeeld", bron: "medewerker", categorie: "c3" }] });
+  assert.deepEqual(b.json().plaatshouders.map((p) => p.categorie), ["c3"]);
+  // Wie het origineel niet kan lezen, kan de grondslag niet wijzigen.
+  assert.equal((await vraag("POST", "/pii/categorie", { plaatshouder: "[OVERIG 1]", categorie: "c2" }, kop(0))).statusCode, 403);
+  const r = await vraag("POST", "/pii/categorie", { plaatshouder: "[OVERIG 1]", categorie: "c2" }, kop(1));
+  assert.equal(r.statusCode, 200, r.body);
+  assert.deepEqual(r.json(), { plaatshouder: "[OVERIG 1]", soort: "overig", categorie: "c2" });
+  const reg = (await vraag("GET", "/pii")).json().registraties.find((x) => x.plaatshouder === "[OVERIG 1]");
+  assert.equal(reg.categorie, "c2");
+  assert.equal(reg.algoritme, "ChaCha20-Poly1305");
+  // Nu vraagt het origineel PPL 2, en het is nog hetzelfde.
+  assert.equal((await vraag("POST", "/pii/onthul", { plaatshouders: ["[OVERIG 1]"] }, kop(1))).statusCode, 403);
+  assert.deepEqual((await vraag("POST", "/pii/onthul", { plaatshouders: ["[OVERIG 1]"] }, kop(2))).json().waarden, [{ plaatshouder: "[OVERIG 1]", waarde: "depressie" }]);
+  // Terug naar art. 6 vraagt ook PPL 2 (het origineel lezen).
+  assert.equal((await vraag("POST", "/pii/categorie", { plaatshouder: "[OVERIG 1]", categorie: "c1" }, kop(1))).statusCode, 403);
+  const g = (await vraag("GET", "/gebeurtenissen")).json().filter((x) => x.type === "pii.categorie-gewijzigd");
+  assert.deepEqual(g.map((x) => x.gegevens), [{ plaatshouder: "[OVERIG 1]", van: "c1", naar: "c2" }]);
+  assert.equal(JSON.stringify(g).includes("depressie"), false, "geen waarden in de gebeurtenis");
+  assert.equal((await vraag("POST", "/pii/categorie", { plaatshouder: "[ONBEKEND 9]", categorie: "c2" })).statusCode, 404);
+  await vraag("POST", "/pii/vervallen", { plaatshouders: ["[OVERIG 1]", "[PERSOON 3]"] });
+});
+
 test("bevestigen: definitief, de rest vervalt, nieuwe versie; het origineel alleen voor PPL 3", { skip: overslaan }, async () => {
   const r = await vraag("POST", "/pii/bevestig", {
     inhoud: html("<p>Mevrouw [PERSOON 1], [ADRES 1], [GEZONDHEID 1].</p>"),
@@ -99,6 +125,12 @@ test("bevestigen: definitief, de rest vervalt, nieuwe versie; het origineel alle
   // Bevestigde gegevens vervallen niet.
   await vraag("POST", "/pii/vervallen", { plaatshouders: ["[PERSOON 1]"] });
   assert.equal((await vraag("GET", "/pii")).json().registraties.length, 3);
+});
+
+test("grondslag: na bevestigen ligt hij vast", { skip: overslaan }, async () => {
+  const r = await vraag("POST", "/pii/categorie", { plaatshouder: "[PERSOON 1]", categorie: "c2" }, kop(3));
+  assert.equal(r.statusCode, 409, r.body);
+  assert.equal(r.json().fout, "pii-bevestigd");
 });
 
 test("terugzetten per gegeven: binnen het niveau, en de volgende versie vraagt dat niveau", { skip: overslaan }, async () => {

@@ -10,8 +10,8 @@ const VERSIE = (() => {
     return "onbekend";
   }
 })();
-import type { Actor, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
-import { INHOUD_SCHEMA, METADATAMODELLEN, ROLLEN, WAARDELIJSTEN, actieveVelden, controleerConfig, rolWaarden, schemaUitConfig, type MetadatamodelConfig } from "@digitaalgemeengoed/oa-contract";
+import type { Actor, AnonimiseringsMeting, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
+import { INHOUD_SCHEMA, METADATAMODELLEN, SIGNAALWOORDEN, ROLLEN, WAARDELIJSTEN, actieveVelden, controleerConfig, rolWaarden, schemaUitConfig, type MetadatamodelConfig } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
 import { ZoekenUit, type Zoekindex } from "./zoekindex.js";
 import {
@@ -33,6 +33,7 @@ import {
   wijzigAard,
   legAnonimiseringVast,
 } from "./objecten.js";
+import { meetKwaliteit } from "./kwaliteit.js";
 import { bevestigPii, leesPiiRegister, onthulPii, registreerPii, terugzettenPii, toetsVersieMetPii, vernietigPii, vervallenPii, wijzigCategoriePii, zetVersieTerug } from "./piiregister.js";
 
 interface Context {
@@ -441,14 +442,53 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[] } }>(
+  const METING_SCHEMA = {
+    type: "object",
+    required: ["items"],
+    additionalProperties: false,
+    properties: {
+      motor: { type: "string", maxLength: 200 },
+      items: {
+        type: "array",
+        maxItems: 5000,
+        items: {
+          type: "object",
+          required: ["soort", "bron", "uitkomst", "standaard", "plekken"],
+          additionalProperties: false,
+          properties: {
+            soort: { type: "string", maxLength: 40 },
+            bron: { enum: ["model", "patroon", "medewerker"] },
+            score: { type: "number", minimum: 0, maximum: 1 },
+            uitkomst: { enum: ["bevestigd", "gelaten", "toegevoegd"] },
+            reden: { enum: ["geen-persoonsgegeven", "mag-openbaar", "verkeerde-soort"] },
+            standaard: { type: "boolean" },
+            categorie: { type: "object", required: ["van", "naar"], additionalProperties: false, properties: { van: { enum: ["c1", "c2", "c3"] }, naar: { enum: ["c1", "c2", "c3"] } } },
+            // De vorm bevat alleen 9, A, a, spaties en leestekens: nooit letters of cijfers van de waarde zelf.
+            vorm: { type: "string", maxLength: 60, pattern: "^[9Aa \\p{P}\\p{S}]*$" },
+            lengte: { enum: ["kort", "middel", "lang"] },
+            signaal: { enum: [...SIGNAALWOORDEN] },
+            plekken: { type: "integer", minimum: 0, maximum: 100000 },
+            plekkenGelaten: { type: "integer", minimum: 0, maximum: 100000 },
+          },
+        },
+      },
+    },
+  } as const;
+
+  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[]; meting?: AnonimiseringsMeting } }>(
     "/objecten/:id/pii/bevestig",
     {
       schema: {
         body: {
           type: "object",
           required: ["inhoud", "bronversie", "behouden"],
-          properties: { inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA, bronversie: { type: "integer", minimum: 1 }, behouden: { type: "array", maxItems: 5000, items: { type: "string", maxLength: 60 } } },
+          properties: {
+            inhoud: INHOUD_SCHEMA,
+            weergave: WEERGAVE_SCHEMA,
+            bronversie: { type: "integer", minimum: 1 },
+            behouden: { type: "array", maxItems: 5000, items: { type: "string", maxLength: 60 } },
+            meting: METING_SCHEMA,
+          },
         },
       },
     },
@@ -513,6 +553,24 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
         await toetsToegang(c, req.params.id, actor);
         return maakOnleesbaar(c, m, gemeente, actor, req.params.id, req.body.reden);
       });
+    },
+  );
+
+  // --- Kwaliteit van het anonimiseren (beheerportaal) ----------------------
+
+  app.get<{ Querystring: { dagen?: number; drempel?: number } }>(
+    "/anonimisering/kwaliteit",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: { dagen: { type: "integer", minimum: 1, maximum: 3660 }, drempel: { type: "integer", minimum: 2, maximum: 100 } },
+        },
+      },
+    },
+    async (req) => {
+      const { gemeente } = context(req);
+      return inGemeente(gemeente, (c) => meetKwaliteit(c, { dagen: req.query.dagen ?? 90, drempel: req.query.drempel ?? 5 }));
     },
   );
 

@@ -1,5 +1,13 @@
 # Wijzigingen
 
+## 0.9.0 — 2026-11-09
+
+**Kwaliteit van het anonimiseren.**
+
+- Migratie 008: tabel `anonimisering_metingen` (gemeente, dag, herkenner, items), met rijbeveiliging per gemeente. Geen koppeling met het stuk, geen waarden, alleen de dag.
+- `POST /objecten/:id/pii/bevestig` neemt een `meting` aan en bewaart die in dezelfde transactie. Het schema laat geen waarden door: de vorm mag alleen `9`, `A`, `a`, spaties en leestekens bevatten, het signaalwoord moet van de vaste lijst komen.
+- `GET /anonimisering/kwaliteit?dagen=90&drempel=5`: precisie en "gevonden" (een bovengrens voor de recall) per soort en per herkenner, zekerheid tegen terecht/onterecht, gewijzigde grondslag, en de vormen die medewerkers zelf toevoegden of lieten staan, met een regexp als begin voor een patroon. Een vorm verschijnt pas als hij in minstens `drempel` bevestigingen voorkwam.
+
 ## 0.8.0 — 2026-11-09
 
 **Metadatamodellen per gemeente.**

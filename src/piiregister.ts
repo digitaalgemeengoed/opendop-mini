@@ -11,8 +11,9 @@ import {
   type PiiSoort,
   type Ppl,
 } from "@digitaalgemeengoed/oa-contract";
-import type { Inhoud } from "@digitaalgemeengoed/oa-contract";
+import type { AnonimiseringsMeting, Inhoud } from "@digitaalgemeengoed/oa-contract";
 import type { Client } from "./db.js";
+import { bewaarMeting } from "./kwaliteit.js";
 import { legGebeurtenisVast, leesInhoud, leesWeergave, PlatformFout, vergrendel, voegVersieToe, type Middelen, type ObjectMetStaat } from "./objecten.js";
 import { SleutelVernietigd, type Deel } from "./sleutelbeheer.js";
 
@@ -277,10 +278,12 @@ export async function bevestigPii(
   gemeente: string,
   actor: Actor,
   id: string,
-  v: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[] },
+  v: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[]; meting?: AnonimiseringsMeting },
 ): Promise<ObjectMetStaat> {
   await vergrendel(c, id);
   const bron = await c.query("SELECT 1 FROM versies WHERE object = $1 AND nummer = $2", [id, v.bronversie]);
+  // De meting (zonder waarden, zonder koppeling met het stuk) in dezelfde transactie.
+  if (v.meting) await bewaarMeting(c, gemeente, v.meting);
   if (!bron.rowCount) throw new PlatformFout(404, "versie-onbekend", `Versie ${v.bronversie} bestaat niet.`);
   await c.query("DELETE FROM pii_register WHERE object = $1 AND status = 'voorvertoning' AND NOT (plaatshouder = ANY($2))", [id, v.behouden]);
   const r = await c.query(

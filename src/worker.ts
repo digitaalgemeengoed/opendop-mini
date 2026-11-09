@@ -44,7 +44,7 @@ export function maakVerwerkers(pool: pg.Pool, m: Middelen, zoekindex: Zoekindex)
       let tekst = "";
       if (versie !== null) {
         // Heeft de versie een html-weergave (naast een docx of odt), indexeer die.
-        const w = await pool.query("SELECT 1 FROM weergaven WHERE object = $1 AND nummer = $2 AND formaat = 'html'", [id, versie]);
+        const w = await pool.query("SELECT 1 FROM weergaven WHERE object = $1 AND nummer = $2 AND formaat = 'html' AND soort = 'weergave'", [id, versie]);
         const c = pool as unknown as pg.PoolClient;
         const inhoud = w.rowCount ? await leesWeergave(c, m, gemeente, id, versie, "html") : await leesInhoud(c, m, gemeente, id, versie);
         tekst = tekstUit(inhoud.formaat, inhoud.data);

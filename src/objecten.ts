@@ -147,9 +147,20 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
   if (r.rowCount === 0) throw new PlatformFout(404, "object-onbekend", "Dit object bestaat niet.");
   const o = r.rows[0];
   const v = await c.query("SELECT * FROM versies WHERE object = $1 ORDER BY nummer", [id]);
-  const w = await c.query("SELECT nummer, formaat, media_type, grootte, sha256 FROM weergaven WHERE object = $1 ORDER BY nummer, formaat", [id]);
+  const w = await c.query(
+    "SELECT nummer, formaat, media_type, grootte, sha256, soort, volgnummer FROM weergaven WHERE object = $1 ORDER BY nummer, soort DESC, formaat, volgnummer",
+    [id],
+  );
   const weergavenVan = (nummer: number): Weergave[] =>
-    w.rows.filter((x) => x.nummer === nummer).map((x) => ({ formaat: x.formaat, mediaType: x.media_type, grootte: Number(x.grootte), sha256: x.sha256 }));
+    w.rows
+      .filter((x) => x.nummer === nummer)
+      .map((x) => ({
+        formaat: x.formaat,
+        mediaType: x.media_type,
+        grootte: Number(x.grootte),
+        sha256: x.sha256,
+        ...(x.soort === "geanonimiseerd" ? { soort: "geanonimiseerd" as const, volgnummer: x.volgnummer } : {}),
+      }));
   const type = await leesObjecttype(c, o.objecttype_naam, o.objecttype_versie);
   // Een persoonlijk stuk heeft geen metadata: dan is er ook niets onvolledig.
   const t = o.aard === "persoonlijk" ? { ontbreekt: [] as string[] } : toets(`${type.naam}@${type.versie}`, type.schema, o.metadata);
@@ -458,11 +469,13 @@ export async function leesWeergave(
   id: string,
   nummer: number,
   formaat: string,
+  soort: "weergave" | "geanonimiseerd" = "weergave",
 ): Promise<{ data: Buffer; mediaType: string; formaat: string }> {
+  // Van een geanonimiseerde weergave geldt de laatste (hoogste volgnummer).
   const r = await c.query(
     `SELECT w.*, o.sleutel_verpakt, o.onleesbaar_gemaakt FROM weergaven w JOIN objecten o ON o.identificatie = w.object
-      WHERE w.object = $1 AND w.nummer = $2 AND w.formaat = $3`,
-    [id, nummer, formaat],
+      WHERE w.object = $1 AND w.nummer = $2 AND w.formaat = $3 AND w.soort = $4 ORDER BY w.volgnummer DESC LIMIT 1`,
+    [id, nummer, formaat, soort],
   );
   if (r.rowCount === 0) throw new PlatformFout(404, "weergave-onbekend", "Deze versie heeft geen weergave in dit formaat.");
   const w = r.rows[0];
@@ -471,7 +484,7 @@ export async function leesWeergave(
   let data = opgeslagen;
   if (w.versleuteld) {
     try {
-      data = ontsleutel(await datasleutel(m, gemeente, id, w.sleutel_verpakt), opgeslagen, `${id}/${nummer}/${formaat}`);
+      data = ontsleutel(await datasleutel(m, gemeente, id, w.sleutel_verpakt), opgeslagen, contextVan(id, nummer, formaat, w.soort, w.volgnummer));
     } catch (e) {
       if (e instanceof PlatformFout) throw e;
       throw new PlatformFout(500, "integriteit", "De versleutelde weergave is niet te ontsleutelen.");
@@ -481,6 +494,54 @@ export async function leesWeergave(
     throw new PlatformFout(500, "integriteit", "De opgeslagen weergave wijkt af van de registratie.");
   }
   return { data, mediaType: w.media_type, formaat: w.formaat };
+}
+
+/** Waaraan de versleuteling van een weergave is gebonden (AAD). Een gewone weergave houdt de vorm van vóór migratie 005. */
+const contextVan = (id: string, nummer: number, formaat: string, soort = "weergave", volgnummer = 1) =>
+  soort === "weergave" ? `${id}/${nummer}/${formaat}` : `${id}/${nummer}/${formaat}/${soort}-${volgnummer}`;
+
+/**
+ * Een geanonimiseerde weergave vastleggen bij een versie. Wat is afgeschermd,
+ * heeft de medewerker bevestigd; de gebeurtenis bevat alleen de aantallen per
+ * soort, niet de gegevens zelf. Het origineel blijft ongewijzigd.
+ */
+export async function legAnonimiseringVast(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  actor: Actor,
+  id: string,
+  nummer: number,
+  html: Inhoud,
+  overzicht: Record<string, number>,
+): Promise<ObjectMetStaat> {
+  const staat = await vergrendel(c, id);
+  if (staat.onleesbaar) throw ONLEESBAAR();
+  if (html.formaat !== "html") throw new PlatformFout(400, "verzoek-ongeldig", "Een geanonimiseerde weergave is html.");
+  const v = await c.query("SELECT 1 FROM versies WHERE object = $1 AND nummer = $2", [id, nummer]);
+  if (v.rowCount === 0) throw new PlatformFout(404, "versie-onbekend", "Deze versie bestaat niet.");
+  const data = decodeer(html, m.maxBytes);
+  const sha = createHash("sha256").update(data).digest("hex");
+  const vorige = await c.query(
+    "SELECT volgnummer, sha256 FROM weergaven WHERE object = $1 AND nummer = $2 AND formaat = 'html' AND soort = 'geanonimiseerd' ORDER BY volgnummer DESC LIMIT 1",
+    [id, nummer],
+  );
+  // Ongewijzigd ten opzichte van de vorige anonimisering: niets vastleggen.
+  if (vorige.rowCount && vorige.rows[0].sha256 === sha) return leesObject(c, id);
+  const volgnummer = vorige.rowCount ? vorige.rows[0].volgnummer + 1 : 1;
+  const dek = staat.versleuteld ? await datasleutel(m, gemeente, id, staat.verpakt) : null;
+  const sleutel = `${id}/${nummer}-geanonimiseerd-${volgnummer}-${sha.slice(0, 16)}.html`;
+  const opTeSlaan = dek ? versleutel(dek, data, contextVan(id, nummer, "html", "geanonimiseerd", volgnummer)) : data;
+  await m.opslag.schrijf(gemeente, sleutel, opTeSlaan, dek ? "application/octet-stream" : html.mediaType, staat.aard);
+  const schoon = Object.fromEntries(Object.entries(overzicht).filter(([k, n]) => /^[a-z-]{2,30}$/.test(k) && Number.isInteger(n) && n >= 0));
+  const g = await legGebeurtenisVast(c, gemeente, "anonimisering.vastgelegd", id, actor, { versie: nummer, volgnummer, sha256: sha, afgeschermd: schoon });
+  await c.query(
+    `INSERT INTO weergaven (object, gemeente, nummer, formaat, media_type, sha256, grootte, opslagsleutel, versleuteld, ruimte, soort, volgnummer)
+     VALUES ($1, $2, $3, 'html', $4, $5, $6, $7, $8, $9, 'geanonimiseerd', $10)`,
+    [id, gemeente, nummer, html.mediaType, sha, data.length, sleutel, staat.versleuteld, staat.aard, volgnummer],
+  );
+  await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
+  return leesObject(c, id);
 }
 
 /**

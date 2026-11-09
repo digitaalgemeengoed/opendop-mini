@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 0.5.0 — 2026-11-09
+
+Migratie 005: **geanonimiseerde weergaven**. `POST /objecten/:id/versies/:n/anonimisering` legt de door de medewerker bevestigde, geanonimiseerde html vast als weergave bij die versie (soort `geanonimiseerd`, versleuteld zoals de versie, in de bucket van het stuk). Een correctie krijgt een hoger volgnummer; ongewijzigd levert niets nieuws op. De gebeurtenis `anonimisering.vastgelegd` bevat alleen de aantallen per soort, nooit de gegevens. Lezen: `GET …/weergaven/html?soort=geanonimiseerd` (de laatste). Het origineel, de gewone weergave en de zoekindex blijven ongewijzigd. Tests: `test/anonimisering.test.js`.
+
 ## 0.4.0 — 2026-11-09
 
 Migratie 004: **zakelijk of persoonlijk**.

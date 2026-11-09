@@ -20,6 +20,7 @@ import {
   type Middelen,
   toetsToegang,
   wijzigAard,
+  legAnonimiseringVast,
 } from "./objecten.js";
 
 interface Context {
@@ -223,14 +224,36 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
 
-  app.get<{ Params: { id: string; nummer: string; formaat: string } }>("/objecten/:id/versies/:nummer/weergaven/:formaat", async (req, antwoord) => {
+  app.get<{ Params: { id: string; nummer: string; formaat: string }; Querystring: { soort?: string } }>("/objecten/:id/versies/:nummer/weergaven/:formaat", async (req, antwoord) => {
     const { gemeente, actor } = context(req);
+    const soort = req.query.soort === "geanonimiseerd" ? "geanonimiseerd" : "weergave";
     const r = await inGemeente(gemeente, async (c) => {
       await toetsToegang(c, req.params.id, actor);
-      return leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat);
+      return leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat, soort);
     });
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
   });
+
+  app.post<{ Params: { id: string; nummer: string }; Body: { inhoud: Inhoud; overzicht: Record<string, number> } }>(
+    "/objecten/:id/versies/:nummer/anonimisering",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["inhoud", "overzicht"],
+          properties: { inhoud: INHOUD_SCHEMA, overzicht: { type: "object", additionalProperties: { type: "integer", minimum: 0 }, maxProperties: 30 } },
+        },
+      },
+    },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const o = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return legAnonimiseringVast(c, m, gemeente, actor, req.params.id, Number(req.params.nummer), req.body.inhoud, req.body.overzicht);
+      });
+      return antwoord.status(201).send(o);
+    },
+  );
 
   app.post<{ Params: { id: string }; Body: { reden: string } }>(
     "/objecten/:id/onleesbaar",

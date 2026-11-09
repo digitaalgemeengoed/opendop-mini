@@ -1,5 +1,15 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+/** De eigen versie, voor /gezondheid (de overzichtspagina toont welke versie draait). */
+const VERSIE = (() => {
+  try {
+    return (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string }).version ?? "onbekend";
+  } catch {
+    return "onbekend";
+  }
+})();
 import type { Actor, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
 import { INHOUD_SCHEMA } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
@@ -80,6 +90,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
 
   app.get("/gezondheid", async () => ({
     status: "ok",
+    versie: VERSIE,
     opslag: m.opslag.soort,
     sleutelbeheer: m.sleutelbeheer?.soort ?? "uit",
     zoekindex: opties.zoekindex.soort,

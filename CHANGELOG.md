@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 0.7.1 — 2026-11-09
+
+`/gezondheid` noemt de versie van het platform (voor de overzichtspagina).
+
 ## 0.7.0 — 2026-11-09
 
 **Anonimiseren in het document** (migratie 007, draait vanzelf).

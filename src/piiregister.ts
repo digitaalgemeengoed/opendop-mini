@@ -11,8 +11,9 @@ import {
   type PiiSoort,
   type Ppl,
 } from "@digitaalgemeengoed/oa-contract";
+import type { Inhoud } from "@digitaalgemeengoed/oa-contract";
 import type { Client } from "./db.js";
-import { legGebeurtenisVast, PlatformFout, vergrendel, type Middelen } from "./objecten.js";
+import { legGebeurtenisVast, leesInhoud, leesWeergave, PlatformFout, vergrendel, voegVersieToe, type Middelen, type ObjectMetStaat } from "./objecten.js";
 import { SleutelVernietigd, type Deel } from "./sleutelbeheer.js";
 
 /**
@@ -137,6 +138,7 @@ export async function registreerPii(
   actor: Actor,
   id: string,
   invoer: PiiInvoer[],
+  voorvertoning = false,
 ): Promise<{ plaatshouder: string; soort: PiiSoort; categorie: PiiCategorie; nieuw: boolean }[]> {
   zonderSleutelbeheer(m);
   await vergrendel(c, id);
@@ -162,19 +164,37 @@ export async function registreerPii(
     const cat = info.categorie;
     if (!sleutels.has(cat)) sleutels.set(cat, await sleutelVoor(c, m, gemeente, id, cat, cat !== "c3"));
     const s = sleutels.get(cat)!;
-    const n = await c.query("SELECT count(*) AS n FROM pii_register WHERE object = $1 AND plaatshouder LIKE $2", [id, `[${info.plaatshouder} %`]);
+    // Het hoogste nummer plus één (een vervallen voorvertoning laat een gat, of geeft haar nummer vrij).
+    const n = await c.query(
+      `SELECT COALESCE(max((regexp_match(plaatshouder, ' ([0-9]+)\\]$'))[1]::int), 0) AS n FROM pii_register WHERE object = $1 AND plaatshouder LIKE $2`,
+      [id, `[${info.plaatshouder} %`],
+    );
     const plaatshouder = `[${info.plaatshouder} ${Number(n.rows[0].n) + 1}]`;
     await c.query(
-      `INSERT INTO pii_register (object, gemeente, plaatshouder, soort, categorie, algoritme, cijfertekst, zoeksleutel, bron, versie, vastgelegd, door)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [id, gemeente, plaatshouder, i.soort, cat, PII_CATEGORIE[cat].algoritme, versleutelWaarde(s, id, plaatshouder, waarde), zoek, i.bron, laatste + 1, tijd, actor.sub],
+      `INSERT INTO pii_register (object, gemeente, plaatshouder, soort, categorie, algoritme, cijfertekst, zoeksleutel, bron, versie, vastgelegd, door, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        id,
+        gemeente,
+        plaatshouder,
+        i.soort,
+        cat,
+        PII_CATEGORIE[cat].algoritme,
+        versleutelWaarde(s, id, plaatshouder, waarde),
+        zoek,
+        i.bron,
+        laatste + 1,
+        tijd,
+        actor.sub,
+        voorvertoning ? "voorvertoning" : "bevestigd",
+      ],
     );
     nieuwPer[cat] = (nieuwPer[cat] ?? 0) + 1;
     uit.push({ plaatshouder, soort: i.soort, categorie: cat, nieuw: true });
   }
-  if (Object.keys(nieuwPer).length) {
-    // De versies tot nu toe bevatten deze gegevens nog leesbaar.
-    await c.query("UPDATE objecten SET pii_tot_versie = GREATEST(COALESCE(pii_tot_versie, 0), $2) WHERE identificatie = $1", [id, laatste]);
+  if (Object.keys(nieuwPer).length && !voorvertoning) {
+    // De versies tot nu toe bevatten deze gegevens nog leesbaar: alleen PPL 3.
+    await beschermOriginelen(c, id, laatste);
     const g = await legGebeurtenisVast(c, gemeente, "pii.geregistreerd", id, actor, {
       nieuw: nieuwPer,
       plaatshouders: uit.filter((u) => u.nieuw).map((u) => u.plaatshouder),
@@ -184,14 +204,98 @@ export async function registreerPii(
   return uit;
 }
 
+/** Versies tot en met `tot` bevatten de gegevens nog leesbaar: alleen PPL 3 mag ze lezen. */
+async function beschermOriginelen(c: Client, id: string, tot: number): Promise<void> {
+  await c.query("UPDATE versies SET ppl = 3 WHERE object = $1 AND nummer <= $2 AND ppl < 3", [id, tot]);
+  await c.query("UPDATE objecten SET pii_tot_versie = GREATEST(COALESCE(pii_tot_versie, 0), $2) WHERE identificatie = $1", [id, tot]);
+}
+
+/** Voorvertoningen die de medewerker laat staan: uit het register. Bevestigde gegevens blijven. */
+export async function vervallenPii(c: Client, id: string, actor: Actor, plaatshouders: string[]): Promise<PiiRegister> {
+  await vergrendel(c, id);
+  await c.query("DELETE FROM pii_register WHERE object = $1 AND plaatshouder = ANY($2) AND status = 'voorvertoning'", [id, plaatshouders]);
+  return leesPiiRegister(c, id, actor);
+}
+
+/**
+ * Bevestigen: de voorvertoningen die nog in het document staan worden
+ * definitief, de andere vervallen. De versies tot en met de bronversie
+ * bevatten de gegevens nog: die mag alleen PPL 3 lezen. Het geanonimiseerde
+ * document wordt een nieuwe versie (soort anonimisering).
+ */
+export async function bevestigPii(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  actor: Actor,
+  id: string,
+  v: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[] },
+): Promise<ObjectMetStaat> {
+  await vergrendel(c, id);
+  const bron = await c.query("SELECT 1 FROM versies WHERE object = $1 AND nummer = $2", [id, v.bronversie]);
+  if (!bron.rowCount) throw new PlatformFout(404, "versie-onbekend", `Versie ${v.bronversie} bestaat niet.`);
+  await c.query("DELETE FROM pii_register WHERE object = $1 AND status = 'voorvertoning' AND NOT (plaatshouder = ANY($2))", [id, v.behouden]);
+  const r = await c.query(
+    "UPDATE pii_register SET status = 'bevestigd' WHERE object = $1 AND status = 'voorvertoning' AND plaatshouder = ANY($2) RETURNING plaatshouder, categorie",
+    [id, v.behouden],
+  );
+  if (r.rowCount) {
+    await beschermOriginelen(c, id, v.bronversie);
+    const nieuw: Partial<Record<PiiCategorie, number>> = {};
+    for (const x of r.rows) nieuw[x.categorie as PiiCategorie] = (nieuw[x.categorie as PiiCategorie] ?? 0) + 1;
+    const g = await legGebeurtenisVast(c, gemeente, "pii.geregistreerd", id, actor, { nieuw, plaatshouders: r.rows.map((x) => x.plaatshouder), bronversie: v.bronversie });
+    await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
+  }
+  await c.query("UPDATE objecten SET ppl_werk = 0 WHERE identificatie = $1", [id]);
+  return voegVersieToe(c, m, gemeente, actor, id, v.inhoud, undefined, v.weergave, { soort: "anonimisering", bronversie: v.bronversie, ppl: 0 });
+}
+
+/**
+ * Bevestigde gegevens terugzetten in het document: geeft de waarden (binnen
+ * het eigen niveau). Het werkdocument bevat ze daarna weer: volgende versies
+ * vragen het niveau van die categorie.
+ */
+export async function terugzettenPii(c: Client, m: Middelen, gemeente: string, actor: Actor, id: string, plaatshouders: string[]): Promise<PiiOnthuld[]> {
+  const waarden = await onthulPii(c, m, gemeente, actor, id, plaatshouders, "pii.teruggezet");
+  const r = await c.query("SELECT COALESCE(max(CASE categorie WHEN 'c1' THEN 1 WHEN 'c2' THEN 2 ELSE 3 END), 0) AS n FROM pii_register WHERE object = $1 AND plaatshouder = ANY($2)", [
+    id,
+    plaatshouders,
+  ]);
+  await c.query("UPDATE objecten SET ppl_werk = GREATEST(ppl_werk, $2) WHERE identificatie = $1", [id, Number(r.rows[0].n)]);
+  return waarden;
+}
+
+/**
+ * Een eerdere versie terugzetten als nieuwe versie. Een versie met
+ * persoonsgegevens: alleen met het niveau van die versie, en een reden.
+ */
+export async function zetVersieTerug(c: Client, m: Middelen, gemeente: string, actor: Actor, id: string, nummer: number, reden: string): Promise<ObjectMetStaat> {
+  await vergrendel(c, id);
+  await toetsVersieMetPii(c, id, nummer, actor);
+  const v = await c.query("SELECT ppl FROM versies WHERE object = $1 AND nummer = $2", [id, nummer]);
+  const ppl = Number(v.rows[0].ppl);
+  const inhoud = await leesInhoud(c, m, gemeente, id, nummer);
+  const w = await c.query("SELECT formaat FROM weergaven WHERE object = $1 AND nummer = $2 AND soort = 'weergave' LIMIT 1", [id, nummer]);
+  const weergave = w.rowCount ? await leesWeergave(c, m, gemeente, id, nummer, w.rows[0].formaat) : null;
+  const naarInhoud = (x: { data: Buffer; mediaType: string; formaat: string }): Inhoud => ({
+    formaat: x.formaat as Inhoud["formaat"],
+    mediaType: x.mediaType,
+    codering: "base64",
+    data: x.data.toString("base64"),
+  });
+  const g = await legGebeurtenisVast(c, gemeente, "versie.teruggezet", id, actor, { nummer, reden });
+  await c.query("UPDATE objecten SET laatste_volgnummer = $2, ppl_werk = GREATEST(ppl_werk, $3) WHERE identificatie = $1", [id, g.volgnummer, ppl]);
+  return voegVersieToe(c, m, gemeente, actor, id, naarInhoud(inhoud), undefined, weergave ? naarInhoud(weergave) : undefined, { soort: "terugzetting", bronversie: nummer, ppl });
+}
+
 export async function leesPiiRegister(c: Client, id: string, actor: Actor): Promise<PiiRegister> {
   const r = await c.query(
-    `SELECT r.plaatshouder, r.soort, r.categorie, r.algoritme, r.bron, r.versie, r.vastgelegd, r.door, s.vernietigd
+    `SELECT r.plaatshouder, r.soort, r.categorie, r.algoritme, r.bron, r.versie, r.vastgelegd, r.door, r.status, s.vernietigd
        FROM pii_register r LEFT JOIN pii_sleutels s ON s.object = r.object AND s.categorie = r.categorie
       WHERE r.object = $1 ORDER BY r.vastgelegd, r.plaatshouder`,
     [id],
   );
-  const o = await c.query("SELECT pii_tot_versie FROM objecten WHERE identificatie = $1", [id]);
+  const o = await c.query("SELECT max(nummer) AS tot FROM versies WHERE object = $1 AND ppl > 0", [id]);
   const registraties: PiiRegistratie[] = r.rows.map((x) => ({
     plaatshouder: x.plaatshouder,
     soort: x.soort,
@@ -203,12 +307,21 @@ export async function leesPiiRegister(c: Client, id: string, actor: Actor): Prom
     vastgelegd: new Date(x.vastgelegd).toISOString(),
     door: x.door,
     ...(x.vernietigd ? { vernietigd: true } : {}),
+    status: x.status,
   }));
-  return { registraties, ...(o.rows[0]?.pii_tot_versie ? { metGegevensTot: o.rows[0].pii_tot_versie } : {}), niveau: niveauVan(actor) };
+  return { registraties, ...(o.rows[0]?.tot ? { metGegevensTot: o.rows[0].tot } : {}), niveau: niveauVan(actor) };
 }
 
 /** Originele waarden inzien, binnen het eigen niveau. Wordt vastgelegd (zonder de waarden). */
-export async function onthulPii(c: Client, m: Middelen, gemeente: string, actor: Actor, id: string, plaatshouders: string[]): Promise<PiiOnthuld[]> {
+export async function onthulPii(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  actor: Actor,
+  id: string,
+  plaatshouders: string[],
+  gebeurtenis: "pii.ingezien" | "pii.teruggezet" = "pii.ingezien",
+): Promise<PiiOnthuld[]> {
   zonderSleutelbeheer(m);
   const r = await c.query("SELECT plaatshouder, categorie, cijfertekst FROM pii_register WHERE object = $1 AND plaatshouder = ANY($2)", [id, plaatshouders]);
   if (r.rowCount !== new Set(plaatshouders).size) throw new PlatformFout(404, "pii-onbekend", "Een van de plaatshouders staat niet in het register van dit stuk.");
@@ -226,29 +339,47 @@ export async function onthulPii(c: Client, m: Middelen, gemeente: string, actor:
     if (!sleutels.has(cat)) sleutels.set(cat, await sleutelVoor(c, m, gemeente, id, cat, true));
     uit.push({ plaatshouder: x.plaatshouder, waarde: ontsleutelWaarde(sleutels.get(cat)!, id, x.plaatshouder, x.cijfertekst) });
   }
-  const g = await legGebeurtenisVast(c, gemeente, "pii.ingezien", id, actor, { plaatshouders: uit.map((u) => u.plaatshouder) });
+  const g = await legGebeurtenisVast(c, gemeente, gebeurtenis, id, actor, { plaatshouders: uit.map((u) => u.plaatshouder) });
   await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
   return uit;
 }
 
 /** De sleutel van één categorie vernietigen: die waarden zijn daarna voor niemand meer te lezen. */
-export async function vernietigPii(c: Client, m: Middelen, gemeente: string, actor: Actor, id: string, cat: PiiCategorie, reden: string): Promise<PiiRegister> {
+export async function vernietigPii(
+  c: Client,
+  m: Middelen,
+  gemeente: string,
+  actor: Actor,
+  id: string,
+  cat: PiiCategorie,
+  reden: string,
+  originelen: "laten" | "beperken" = "laten",
+): Promise<PiiRegister> {
   zonderSleutelbeheer(m);
   await vergrendel(c, id);
   const r = await c.query("UPDATE pii_sleutels SET vernietigd = now() WHERE object = $1 AND categorie = $2 AND vernietigd IS NULL RETURNING 1", [id, cat]);
   if (!r.rowCount) throw new PlatformFout(404, "pii-sleutel-onbekend", "Dit stuk heeft geen (werkende) sleutel voor deze categorie.");
-  const g = await legGebeurtenisVast(c, gemeente, "pii.vernietigd", id, actor, { categorie: cat, reden });
+  // De originele versies zijn archiefstukken: vernietigen kan alleen via het vernietigingsproces. Wel kan de toegang omlaag.
+  if (originelen === "beperken") await c.query("UPDATE versies SET beperkt = true WHERE object = $1 AND ppl > 0", [id]);
+  const g = await legGebeurtenisVast(c, gemeente, "pii.vernietigd", id, actor, { categorie: cat, reden, originelen });
   await c.query("UPDATE objecten SET laatste_volgnummer = $2 WHERE identificatie = $1", [id, g.volgnummer]);
   // Eerst vastleggen, dan vernietigen: lukt dat niet, dan rolt de transactie terug.
   await m.sleutelbeheer!.vernietigDeel(gemeente, id, deel(cat));
   return leesPiiRegister(c, id, actor);
 }
 
-/** Een versie van vóór het anonimiseren bevat de gegevens nog: alleen PPL 3 mag die lezen. */
+/**
+ * Een versie die persoonsgegevens bevat, mag alleen lezen wie het niveau van
+ * die versie heeft; een beperkte versie alleen informatiebeheer.
+ */
 export async function toetsVersieMetPii(c: Client, id: string, nummer: number, actor: Actor): Promise<void> {
-  const r = await c.query("SELECT pii_tot_versie FROM objecten WHERE identificatie = $1", [id]);
-  const tot = r.rows[0]?.pii_tot_versie;
-  if (tot && nummer <= tot && niveauVan(actor) < 3) {
-    throw new PlatformFout(403, "pii-versie", `Versie ${nummer} is van vóór het anonimiseren en bevat de persoonsgegevens nog. Alleen wie PPL 3 heeft, mag die lezen.`);
+  const r = await c.query("SELECT ppl, beperkt FROM versies WHERE object = $1 AND nummer = $2", [id, nummer]);
+  if (!r.rowCount) return; // bestaat niet: dat meldt de lezer zelf
+  const { ppl, beperkt } = r.rows[0];
+  if (beperkt && !actor.beheerder) {
+    throw new PlatformFout(403, "versie-beperkt", `Versie ${nummer} bevat persoonsgegevens en is alleen nog in te zien voor informatiebeheer.`);
+  }
+  if (niveauVan(actor) < Number(ppl)) {
+    throw new PlatformFout(403, "pii-versie", `Versie ${nummer} bevat persoonsgegevens. Daarvoor is PPL ${ppl} nodig; je hebt PPL ${niveauVan(actor)}.`);
   }
 }

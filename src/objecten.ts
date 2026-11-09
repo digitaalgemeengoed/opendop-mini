@@ -180,6 +180,9 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
         vastgelegd: x.vastgelegd.toISOString(),
         door: x.door,
         ...(weergavenVan(x.nummer).length ? { weergaven: weergavenVan(x.nummer) } : {}),
+        ...(x.soort && x.soort !== "gewoon" ? { soort: x.soort, ...(x.bronversie ? { bronversie: x.bronversie } : {}) } : {}),
+        ...(x.ppl ? { ppl: x.ppl } : {}),
+        ...(x.beperkt ? { beperkt: true } : {}),
       }),
     ),
     aangemaakt: o.aangemaakt.toISOString(),
@@ -330,6 +333,7 @@ export async function voegVersieToe(
   inhoud: Inhoud,
   verwachteVolgnummer?: number,
   weergave?: Inhoud,
+  opties: { soort?: "gewoon" | "anonimisering" | "terugzetting"; bronversie?: number; ppl?: number } = {},
 ): Promise<ObjectMetStaat> {
   const staat = await vergrendel(c, id, verwachteVolgnummer);
   if (staat.onleesbaar) throw ONLEESBAAR();
@@ -372,12 +376,32 @@ export async function voegVersieToe(
     grootte: data.length,
     mediaType: inhoud.mediaType,
     formaat: inhoud.formaat,
+    ...(opties.soort && opties.soort !== "gewoon" ? { soort: opties.soort, bronversie: opties.bronversie } : {}),
     ...(weergave ? { weergaven: [{ formaat: weergave.formaat, mediaType: weergave.mediaType, sha256: wSha, grootte: wData!.length }] } : {}),
   });
   await c.query(
-    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld, vergelijk_sha256, ruimte)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-    [id, gemeente, nummer, sha256, data.length, inhoud.mediaType, inhoud.formaat, sleutel, g.tijdstip, actor.sub, staat.versleuteld, wSha, ruimte],
+    `INSERT INTO versies (object, gemeente, nummer, sha256, grootte, media_type, formaat, opslagsleutel, vastgelegd, door, versleuteld, vergelijk_sha256, ruimte,
+                          soort, bronversie, ppl)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+             COALESCE($16, (SELECT ppl_werk FROM objecten WHERE identificatie = $1)))`,
+    [
+      id,
+      gemeente,
+      nummer,
+      sha256,
+      data.length,
+      inhoud.mediaType,
+      inhoud.formaat,
+      sleutel,
+      g.tijdstip,
+      actor.sub,
+      staat.versleuteld,
+      wSha,
+      ruimte,
+      opties.soort ?? "gewoon",
+      opties.bronversie ?? null,
+      opties.ppl ?? null,
+    ],
   );
   if (weergave && wData) {
     await c.query(

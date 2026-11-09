@@ -22,7 +22,7 @@ import {
   wijzigAard,
   legAnonimiseringVast,
 } from "./objecten.js";
-import { leesPiiRegister, onthulPii, registreerPii, toetsVersieMetPii, vernietigPii } from "./piiregister.js";
+import { bevestigPii, leesPiiRegister, onthulPii, registreerPii, terugzettenPii, toetsVersieMetPii, vernietigPii, vervallenPii, zetVersieTerug } from "./piiregister.js";
 
 interface Context {
   gemeente: string;
@@ -57,6 +57,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     if (!actor?.sub) throw new PlatformFout(400, "actor-ongeldig", "Actor ontbreekt of is ongeldig.");
     // Het PPL-niveau komt van de integratielaag (rollen ppl-1..3); alles anders telt als 0.
     actor.niveau = ([0, 1, 2, 3] as const).find((n) => n === actor.niveau) ?? 0;
+    actor.beheerder = actor.beheerder === true;
     return { gemeente, actor };
   }
 
@@ -261,7 +262,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
   );
 
   // Register van persoonsgegevens (anonimiseren bij de bron).
-  app.post<{ Params: { id: string }; Body: { items: PiiInvoer[] } }>(
+  app.post<{ Params: { id: string }; Body: { items: PiiInvoer[]; voorvertoning?: boolean } }>(
     "/objecten/:id/pii",
     {
       schema: {
@@ -278,6 +279,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
                 properties: { soort: { type: "string", maxLength: 40 }, waarde: { type: "string", minLength: 1, maxLength: 2000 }, bron: { enum: ["model", "patroon", "medewerker"] } },
               },
             },
+            voorvertoning: { type: "boolean" },
           },
         },
       },
@@ -286,7 +288,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
       const { gemeente, actor } = context(req);
       const plaatshouders = await inGemeente(gemeente, async (c) => {
         await toetsToegang(c, req.params.id, actor);
-        return registreerPii(c, m, gemeente, actor, req.params.id, req.body.items);
+        return registreerPii(c, m, gemeente, actor, req.params.id, req.body.items, req.body.voorvertoning === true);
       });
       return antwoord.status(201).send({ plaatshouders });
     },
@@ -313,18 +315,77 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { categorie: "c1" | "c2" | "c3"; reden: string } }>(
+  app.post<{ Params: { id: string }; Body: { plaatshouders: string[] } }>(
+    "/objecten/:id/pii/vervallen",
+    { schema: { body: { type: "object", required: ["plaatshouders"], properties: { plaatshouders: { type: "array", maxItems: 5000, items: { type: "string", maxLength: 60 } } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return vervallenPii(c, req.params.id, actor, req.body.plaatshouders);
+      });
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; weergave?: Inhoud; bronversie: number; behouden: string[] } }>(
+    "/objecten/:id/pii/bevestig",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["inhoud", "bronversie", "behouden"],
+          properties: { inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA, bronversie: { type: "integer", minimum: 1 }, behouden: { type: "array", maxItems: 5000, items: { type: "string", maxLength: 60 } } },
+        },
+      },
+    },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const o = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return bevestigPii(c, m, gemeente, actor, req.params.id, req.body);
+      });
+      return antwoord.status(201).send(o);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { plaatshouders: string[] } }>(
+    "/objecten/:id/pii/terugzetten",
+    { schema: { body: { type: "object", required: ["plaatshouders"], properties: { plaatshouders: { type: "array", minItems: 1, maxItems: 500, items: { type: "string", maxLength: 60 } } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      const waarden = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return terugzettenPii(c, m, gemeente, actor, req.params.id, req.body.plaatshouders);
+      });
+      return { waarden };
+    },
+  );
+
+  app.post<{ Params: { id: string; nummer: string }; Body: { reden: string } }>(
+    "/objecten/:id/versies/:nummer/terugzetten",
+    { schema: { body: { type: "object", required: ["reden"], properties: { reden: { type: "string", minLength: 10, maxLength: 1000 } } } } },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const o = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return zetVersieTerug(c, m, gemeente, actor, req.params.id, Number(req.params.nummer), req.body.reden);
+      });
+      return antwoord.status(201).send(o);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { categorie: "c1" | "c2" | "c3"; reden: string; originelen?: "laten" | "beperken" } }>(
     "/objecten/:id/pii/vernietig",
     {
       schema: {
-        body: { type: "object", required: ["categorie", "reden"], properties: { categorie: { enum: ["c1", "c2", "c3"] }, reden: { type: "string", minLength: 10, maxLength: 1000 } } },
+        body: { type: "object", required: ["categorie", "reden"], properties: { categorie: { enum: ["c1", "c2", "c3"] }, reden: { type: "string", minLength: 10, maxLength: 1000 }, originelen: { enum: ["laten", "beperken"] } } },
       },
     },
     async (req) => {
       const { gemeente, actor } = context(req);
       return inGemeente(gemeente, async (c) => {
         await toetsToegang(c, req.params.id, actor);
-        return vernietigPii(c, m, gemeente, actor, req.params.id, req.body.categorie, req.body.reden);
+        return vernietigPii(c, m, gemeente, actor, req.params.id, req.body.categorie, req.body.reden, req.body.originelen);
       });
     },
   );

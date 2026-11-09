@@ -1,5 +1,16 @@
 # Wijzigingen
 
+## 0.7.0 — 2026-11-09
+
+**Anonimiseren in het document** (migratie 007, draait vanzelf).
+
+- Registreren als voorvertoning (`voorvertoning: true`): versleuteld en met een vast nummer, maar nog zonder gebeurtenis. `POST /objecten/:id/pii/vervallen` haalt voorvertoningen weg die de medewerker laat staan (bevestigde gegevens blijven).
+- `POST /objecten/:id/pii/bevestig`: de voorvertoningen die nog in het document staan worden definitief, de rest vervalt, en het geanonimiseerde document wordt een nieuwe versie (soort anonimisering, met de bronversie). De versies tot en met de bronversie vragen daarna PPL 3.
+- Per versie het niveau dat nodig is om haar te lezen (`ppl`) en of ze alleen voor informatiebeheer is (`beperkt`); dat vervangt `pii_tot_versie`.
+- `POST /objecten/:id/pii/terugzetten`: een bevestigd gegeven terug in het document (binnen het eigen niveau); de volgende versie vraagt dat niveau.
+- `POST /objecten/:id/versies/:n/terugzetten`: een eerdere versie als nieuwe versie (het niveau van die versie, en een reden).
+- Sleutel vernietigen met `originelen: "beperken"`: de versies met persoonsgegevens zijn daarna alleen nog voor informatiebeheer. Vernietigen van de originelen zelf loopt via het vernietigingsproces (Archiefwet; Object Lock).
+
 ## 0.6.0 — 2026-11-09
 
 **Register van persoonsgegevens** (migratie 006, draait vanzelf). Elk persoonsgegeven dat de medewerker bij anonimiseren bevestigt, staat versleuteld in `pii_register`, met een eigen sleutel per document per AVG-categorie (`pii_sleutels`):

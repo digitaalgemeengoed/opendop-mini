@@ -1,5 +1,14 @@
 # Wijzigingen
 
+## 0.8.0 — 2026-11-09
+
+**Metadatamodellen per gemeente.**
+
+- `GET /metadatamodellen`: de catalogus (MDTO, RGBZ, TMLO, waardelijsten). `POST /metadatamodellen/controle`: een keuze toetsen en de velden tonen, zonder iets vast te leggen.
+- `POST /objecttypen/:naam/model`: een keuze publiceren als nieuwe versie van het objecttype, alleen voor deze gemeente (gebeurtenis `objecttype.gepubliceerd`). Andere gemeenten houden de gedeelde versie; stukken houden de versie waarmee ze zijn vastgelegd.
+- `GET /objecttypen/:naam/versies`: de versies, eigen en gedeeld, met wie ze publiceerde en welk model.
+- Zoeken en indexeren via de rollen in het schema: een RGBZ-veld *titel* komt in de index als naam, filters op informatiecategorie en vertrouwelijkheid werken ongeacht het model. Zoekresultaten hebben `kern`.
+
 ## 0.7.2 — 2026-11-09
 
 **De grondslag van een persoonsgegeven aanpassen.**

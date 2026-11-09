@@ -11,7 +11,7 @@ const VERSIE = (() => {
   }
 })();
 import type { Actor, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
-import { INHOUD_SCHEMA } from "@digitaalgemeengoed/oa-contract";
+import { INHOUD_SCHEMA, METADATAMODELLEN, ROLLEN, WAARDELIJSTEN, actieveVelden, controleerConfig, rolWaarden, schemaUitConfig, type MetadatamodelConfig } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
 import { ZoekenUit, type Zoekindex } from "./zoekindex.js";
 import {
@@ -26,6 +26,7 @@ import {
   maakObject,
   maakOnleesbaar,
   publiceerObjecttype,
+  versiesVanObjecttype,
   voegVersieToe,
   type Middelen,
   toetsToegang,
@@ -108,6 +109,87 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     const versie = req.query.versie ? Number(req.query.versie) : undefined;
     return inGemeente(gemeente, (c) => leesObjecttype(c, req.params.naam, versie));
   });
+
+  // --- Metadatamodellen (beheerportaal) ----------------------------------------
+  // De catalogus (MDTO, RGBZ, TMLO en de waardelijsten, ook uit TOOI) staat in
+  // het contract; het beheerportaal stuurt alleen de keuze van de gemeente.
+
+  app.get("/metadatamodellen", async () => ({ modellen: METADATAMODELLEN, waardelijsten: WAARDELIJSTEN, rollen: ROLLEN }));
+
+  const CONFIG_SCHEMA = {
+    type: "object",
+    required: ["basis", "velden"],
+    additionalProperties: false,
+    properties: {
+      basis: { enum: ["mdto", "rgbz", "tmlo"] },
+      velden: {
+        type: "array",
+        maxItems: 200,
+        items: {
+          type: "object",
+          required: ["sleutel", "aan", "verplicht"],
+          additionalProperties: false,
+          properties: {
+            sleutel: { type: "string", minLength: 1, maxLength: 40 },
+            aan: { type: "boolean" },
+            verplicht: { type: "boolean" },
+            label: { type: "string", maxLength: 100 },
+            beschrijving: { type: "string", maxLength: 500 },
+            waardelijst: { type: "string", maxLength: 60 },
+            eigen: {
+              type: "object",
+              required: ["type"],
+              additionalProperties: false,
+              properties: {
+                type: { enum: ["tekst", "lange-tekst", "datum", "keuze", "getal"] },
+                maxLengte: { type: "integer", minimum: 1, maximum: 10000 },
+                opties: { type: "array", maxItems: 200, items: { type: "string", minLength: 1, maxLength: 200 } },
+                rol: { enum: [...ROLLEN] },
+              },
+            },
+          },
+        },
+      },
+    },
+  } as const;
+
+  /** Een keuze toetsen en tonen zonder iets vast te leggen: problemen, schema en velden zoals het paneel ze krijgt. */
+  app.post<{ Body: { config: MetadatamodelConfig } }>(
+    "/metadatamodellen/controle",
+    { schema: { body: { type: "object", required: ["config"], properties: { config: CONFIG_SCHEMA } } } },
+    async (req) => {
+      const problemen = controleerConfig(req.body.config);
+      const fout = problemen.some((p) => p.ernst === "fout");
+      return { problemen, velden: actieveVelden(req.body.config), schema: fout ? null : schemaUitConfig(req.body.config) };
+    },
+  );
+
+  app.get<{ Params: { naam: string } }>("/objecttypen/:naam/versies", async (req) => {
+    const { gemeente } = context(req);
+    return inGemeente(gemeente, (c) => versiesVanObjecttype(c, gemeente, req.params.naam));
+  });
+
+  /** Een metadatamodel publiceren als nieuwe versie van het objecttype (alleen voor deze gemeente). */
+  app.post<{ Params: { naam: string }; Body: { config: MetadatamodelConfig; titel?: string } }>(
+    "/objecttypen/:naam/model",
+    {
+      schema: {
+        params: { type: "object", properties: { naam: { type: "string", pattern: "^[a-z][a-z0-9-]{1,60}$" } } },
+        body: { type: "object", required: ["config"], additionalProperties: false, properties: { config: CONFIG_SCHEMA, titel: { type: "string", minLength: 1, maxLength: 100 } } },
+      },
+    },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const problemen = controleerConfig(req.body.config).filter((p) => p.ernst === "fout");
+      if (problemen.length) throw new PlatformFout(422, "model-ongeldig", "Het metadatamodel klopt nog niet.", problemen.map((p) => ({ veld: p.sleutel ?? "", melding: p.melding })));
+      const schema = schemaUitConfig(req.body.config);
+      const type = await inGemeente(gemeente, async (c) => {
+        const huidig = await leesObjecttype(c, req.params.naam).catch(() => null);
+        return publiceerObjecttype(c, gemeente, actor, { naam: req.params.naam, titel: req.body.titel ?? huidig?.titel ?? "Document", schema, vervaldatum: null });
+      });
+      return antwoord.status(201).send(type);
+    },
+  );
 
   app.post<{ Body: { naam: string; titel: string; schema: Record<string, unknown>; status?: "concept" | "actief"; vervaldatum?: string } }>(
     "/objecttypen",
@@ -473,18 +555,30 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
         ).rows,
       );
       const perId = new Map(rijen.map((r) => [r.identificatie as string, r]));
+      // De schema's van de objecttypen van de resultaten: daarin staat welk veld welke rol heeft.
+      const schemas = new Map<string, unknown>();
+      await inGemeente(gemeente, async (c) => {
+        for (const r of rijen) {
+          const k = `${r.objecttype_naam}@${r.objecttype_versie}`;
+          if (schemas.has(k)) continue;
+          const t = await c.query("SELECT schema FROM objecttypen WHERE naam = $1 AND versie = $2", [r.objecttype_naam, r.objecttype_versie]);
+          schemas.set(k, t.rows[0]?.schema);
+        }
+      });
       const resultaten: Zoekresultaat[] = [];
       for (const t of treffers) {
         const r = perId.get(t.identificatie);
         if (!r) continue;
         const md = r.metadata as Record<string, unknown>;
-        if (vraag.informatiecategorie && md.informatiecategorie !== vraag.informatiecategorie) continue;
-        if (vraag.vertrouwelijkheid && md.vertrouwelijkheid !== vraag.vertrouwelijkheid) continue;
+        const kern = rolWaarden(schemas.get(`${r.objecttype_naam}@${r.objecttype_versie}`), md);
+        if (vraag.informatiecategorie && kern.informatiecategorie !== vraag.informatiecategorie) continue;
+        if (vraag.vertrouwelijkheid && kern.vertrouwelijkheid !== vraag.vertrouwelijkheid) continue;
         if (vraag.objecttype && r.objecttype_naam !== vraag.objecttype) continue;
         resultaten.push({
           identificatie: t.identificatie,
           objecttype: { naam: r.objecttype_naam, versie: r.objecttype_versie },
           metadata: md,
+          kern,
           versie: r.versie,
           fragmenten: t.fragmenten,
           score: t.score,

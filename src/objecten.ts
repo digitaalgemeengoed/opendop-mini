@@ -113,6 +113,29 @@ export async function lijstObjecttypen(c: Client): Promise<Objecttype[]> {
   return r.rows.map(naarObjecttype);
 }
 
+/** De versies van een objecttype: die van de gemeente zelf en de gedeelde, met wie ze publiceerde. */
+export async function versiesVanObjecttype(c: Client, gemeente: string, naam: string) {
+  const r = await c.query(
+    `SELECT t.versie, t.titel, t.status, t.gepubliceerd, t.schema, (t.gemeente = '*') AS gedeeld,
+            (SELECT g.actor FROM gebeurtenissen g
+              WHERE g.type = 'objecttype.gepubliceerd' AND g.gemeente = $2 AND g.gegevens->>'naam' = t.naam AND (g.gegevens->>'versie')::int = t.versie
+              ORDER BY g.volgnummer DESC LIMIT 1) AS actor
+       FROM objecttypen t WHERE t.naam = $1 ORDER BY t.versie DESC`,
+    [naam, gemeente],
+  );
+  return r.rows.map((x) => ({
+    versie: x.versie as number,
+    titel: x.titel as string,
+    status: x.status as string,
+    gepubliceerd: (x.gepubliceerd as Date).toISOString(),
+    gedeeld: x.gedeeld as boolean,
+    door: (x.actor as { naam?: string; sub?: string } | null)?.naam ?? null,
+    model: ((x.schema as Record<string, unknown>)["x-oa-model"] as string | undefined) ?? null,
+    config: ((x.schema as Record<string, unknown>)["x-oa-config"] as unknown) ?? null,
+    velden: Object.keys(((x.schema as { properties?: object }).properties ?? {}) as object).length,
+  }));
+}
+
 export async function publiceerObjecttype(
   c: Client,
   gemeente: string,

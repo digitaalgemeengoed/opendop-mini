@@ -1,4 +1,5 @@
 import pg from "pg";
+import { rolWaarden } from "@digitaalgemeengoed/oa-contract";
 import { leesInhoud, leesWeergave, type Middelen } from "./objecten.js";
 import { tekstUit, type Zoekindex } from "./zoekindex.js";
 
@@ -49,11 +50,16 @@ export function maakVerwerkers(pool: pg.Pool, m: Middelen, zoekindex: Zoekindex)
         const inhoud = w.rowCount ? await leesWeergave(c, m, gemeente, id, versie, "html") : await leesInhoud(c, m, gemeente, id, versie);
         tekst = tekstUit(inhoud.formaat, inhoud.data);
       }
+      // De index kent vaste velden (naam, informatiecategorie …); welk veld van
+      // het gekozen metadatamodel daarbij hoort, zegt de rol in het schema.
+      const t = await pool.query("SELECT schema FROM objecttypen WHERE gemeente = $1 AND naam = $2 AND versie = $3", [gemeente, obj.objecttype_naam, obj.objecttype_versie]);
+      const rollen = rolWaarden(t.rows[0]?.schema, obj.metadata ?? {});
+      const { titel, ...rest } = rollen;
       await zoekindex.indexeer(gemeente, {
         identificatie: id,
         objecttype: obj.objecttype_naam,
         versie,
-        metadata: obj.metadata,
+        metadata: { ...(titel ? { naam: titel } : {}), ...rest },
         tekst,
         bijgewerkt: new Date().toISOString(),
       });

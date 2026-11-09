@@ -113,6 +113,33 @@ test("een filter wordt ook op het register toegepast, niet alleen op de index", 
   assert.equal(r.resultaten.length, 0);
 });
 
+test("een ander metadatamodel (RGBZ): de index en de filters volgen de rollen", { skip: overslaan }, async () => {
+  const { schemaUitConfig, standaardConfig } = await import("@digitaalgemeengoed/oa-contract");
+  const t = await app.inject({ method: "POST", url: "/objecttypen", headers: kop(), payload: { naam: "stuk-rgbz", titel: "Stuk (RGBZ)", schema: schemaUitConfig(standaardConfig("rgbz")) } });
+  assert.equal(t.statusCode, 201, t.body);
+  const metadata = { titel: "Notitie Duinpad", vertrouwelijkheidaanduiding: "intern", auteur: "Team Wegen", creatiedatum: "2026-11-09", taal: "dut", informatiecategorie: "adviezen" };
+  const fout = await app.inject({ method: "POST", url: "/objecten", headers: kop(), payload: { objecttype: "stuk-rgbz", metadata: { ...metadata, creatiedatum: "9 november" } } });
+  assert.equal(fout.statusCode, 422, "een datum moet jjjj-mm-dd zijn");
+  const o = await app.inject({
+    method: "POST",
+    url: "/objecten",
+    headers: kop(),
+    payload: { objecttype: "stuk-rgbz", metadata, inhoud: { formaat: "html", mediaType: "text/html", codering: "tekst", data: "<p>Het duinpad wordt verlegd.</p>" } },
+  });
+  assert.equal(o.statusCode, 201, o.body);
+  const rid = o.json().identificatie;
+  await verwerk();
+  const doc = os.indexen.get("oa-test-haarlem").get(rid);
+  assert.equal(doc.naam, "Notitie Duinpad", "de titel staat in de index onder naam");
+  assert.equal(doc.vertrouwelijkheid, "intern");
+  const r = await app.inject({ method: "GET", url: "/zoeken?tekst=duinpad&vertrouwelijkheid=intern", headers: kop() });
+  const a = r.json();
+  assert.equal(a.resultaten.length, 1, r.body);
+  assert.deepEqual(a.resultaten[0].kern, { titel: "Notitie Duinpad", vertrouwelijkheid: "intern", auteur: "Team Wegen", datum: "2026-11-09", taal: "dut", informatiecategorie: "adviezen" });
+  const geen = await app.inject({ method: "GET", url: "/zoeken?tekst=duinpad&vertrouwelijkheid=openbaar", headers: kop() });
+  assert.equal(geen.json().resultaten.length, 0);
+});
+
 test("onleesbaar maken: sleutel weg, inhoud 410, registratie en gebeurtenissen blijven, uit de index", { skip: overslaan }, async () => {
   const kort = await app.inject({ method: "POST", url: `/objecten/${id}/onleesbaar`, headers: kop(), payload: { reden: "kort" } });
   assert.equal(kort.statusCode, 400, "een reden van minstens tien tekens");

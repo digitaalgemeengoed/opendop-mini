@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { timingSafeEqual } from "node:crypto";
-import type { Actor, Inhoud, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
+import type { Actor, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
 import { INHOUD_SCHEMA } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
 import { ZoekenUit, type Zoekindex } from "./zoekindex.js";
@@ -22,6 +22,7 @@ import {
   wijzigAard,
   legAnonimiseringVast,
 } from "./objecten.js";
+import { leesPiiRegister, onthulPii, registreerPii, toetsVersieMetPii, vernietigPii } from "./piiregister.js";
 
 interface Context {
   gemeente: string;
@@ -54,6 +55,8 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
       throw new PlatformFout(400, "actor-ongeldig", "Actor ontbreekt of is ongeldig.");
     }
     if (!actor?.sub) throw new PlatformFout(400, "actor-ongeldig", "Actor ontbreekt of is ongeldig.");
+    // Het PPL-niveau komt van de integratielaag (rollen ppl-1..3); alles anders telt als 0.
+    actor.niveau = ([0, 1, 2, 3] as const).find((n) => n === actor.niveau) ?? 0;
     return { gemeente, actor };
   }
 
@@ -219,6 +222,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     const { gemeente, actor } = context(req);
     const r = await inGemeente(gemeente, async (c) => {
       await toetsToegang(c, req.params.id, actor);
+      await toetsVersieMetPii(c, req.params.id, Number(req.params.nummer), actor);
       return leesInhoud(c, m, gemeente, req.params.id, Number(req.params.nummer));
     });
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
@@ -229,6 +233,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     const soort = req.query.soort === "geanonimiseerd" ? "geanonimiseerd" : "weergave";
     const r = await inGemeente(gemeente, async (c) => {
       await toetsToegang(c, req.params.id, actor);
+      if (soort === "weergave") await toetsVersieMetPii(c, req.params.id, Number(req.params.nummer), actor);
       return leesWeergave(c, m, gemeente, req.params.id, Number(req.params.nummer), req.params.formaat, soort);
     });
     return antwoord.header("content-type", r.mediaType).header("x-oa-formaat", r.formaat).send(r.data);
@@ -252,6 +257,75 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
         return legAnonimiseringVast(c, m, gemeente, actor, req.params.id, Number(req.params.nummer), req.body.inhoud, req.body.overzicht);
       });
       return antwoord.status(201).send(o);
+    },
+  );
+
+  // Register van persoonsgegevens (anonimiseren bij de bron).
+  app.post<{ Params: { id: string }; Body: { items: PiiInvoer[] } }>(
+    "/objecten/:id/pii",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["items"],
+          properties: {
+            items: {
+              type: "array",
+              maxItems: 5000,
+              items: {
+                type: "object",
+                required: ["soort", "waarde", "bron"],
+                properties: { soort: { type: "string", maxLength: 40 }, waarde: { type: "string", minLength: 1, maxLength: 2000 }, bron: { enum: ["model", "patroon", "medewerker"] } },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const plaatshouders = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return registreerPii(c, m, gemeente, actor, req.params.id, req.body.items);
+      });
+      return antwoord.status(201).send({ plaatshouders });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>("/objecten/:id/pii", async (req) => {
+    const { gemeente, actor } = context(req);
+    return inGemeente(gemeente, async (c) => {
+      await toetsToegang(c, req.params.id, actor);
+      return leesPiiRegister(c, req.params.id, actor);
+    });
+  });
+
+  app.post<{ Params: { id: string }; Body: { plaatshouders: string[] } }>(
+    "/objecten/:id/pii/onthul",
+    { schema: { body: { type: "object", required: ["plaatshouders"], properties: { plaatshouders: { type: "array", minItems: 1, maxItems: 500, items: { type: "string", maxLength: 60 } } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      const waarden = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return onthulPii(c, m, gemeente, actor, req.params.id, req.body.plaatshouders);
+      });
+      return { waarden };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { categorie: "c1" | "c2" | "c3"; reden: string } }>(
+    "/objecten/:id/pii/vernietig",
+    {
+      schema: {
+        body: { type: "object", required: ["categorie", "reden"], properties: { categorie: { enum: ["c1", "c2", "c3"] }, reden: { type: "string", minLength: 10, maxLength: 1000 } } },
+      },
+    },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return vernietigPii(c, m, gemeente, actor, req.params.id, req.body.categorie, req.body.reden);
+      });
     },
   );
 

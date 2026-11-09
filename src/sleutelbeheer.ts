@@ -20,7 +20,19 @@ export interface Sleutelbeheer {
   pakUit(gemeente: string, objectId: string, verpakt: string): Promise<Buffer>;
   /** Vernietigt de sleutel van een object, onherroepelijk. */
   vernietig(gemeente: string, objectId: string): Promise<void>;
+  /**
+   * Een tweede sleutel bij een object, voor één deel ervan: de
+   * persoonsgegevens van één AVG-categorie ("pii-c1", "pii-c2", "pii-c3").
+   * Zelfde werking: verpakte datasleutel, vernietigen maakt alleen dat deel
+   * onleesbaar.
+   */
+  maakDeelsleutel(gemeente: string, objectId: string, deel: Deel): Promise<string>;
+  pakDeelUit(gemeente: string, objectId: string, deel: Deel, verpakt: string): Promise<Buffer>;
+  vernietigDeel(gemeente: string, objectId: string, deel: Deel): Promise<void>;
 }
+
+export type Deel = "pii-c1" | "pii-c2" | "pii-c3";
+const DEEL = /^pii-c[123]$/;
 
 export class SleutelVernietigd extends Error {}
 
@@ -129,6 +141,29 @@ export class OpenBaoSleutelbeheer implements Sleutelbeheer {
     await this.vraag("POST", `keys/${naam}/config`, { deletion_allowed: true });
     await this.vraag("DELETE", `keys/${naam}`);
   }
+
+  private deelnaam(gemeente: string, objectId: string, deel: Deel): string {
+    if (!DEEL.test(deel)) throw new Error("Ongeldig deel");
+    return `${this.naam(gemeente, objectId)}-${deel}`;
+  }
+
+  async maakDeelsleutel(gemeente: string, objectId: string, deel: Deel): Promise<string> {
+    const naam = this.deelnaam(gemeente, objectId, deel);
+    await this.vraag("POST", `keys/${naam}`, { type: "aes256-gcm96", exportable: false });
+    const r = await this.vraag("POST", `datakey/wrapped/${naam}`, { bits: 256 });
+    return String(r!.data.ciphertext);
+  }
+
+  async pakDeelUit(gemeente: string, objectId: string, deel: Deel, verpakt: string): Promise<Buffer> {
+    const r = await this.vraag("POST", `decrypt/${this.deelnaam(gemeente, objectId, deel)}`, { ciphertext: verpakt });
+    return Buffer.from(String(r!.data.plaintext), "base64");
+  }
+
+  async vernietigDeel(gemeente: string, objectId: string, deel: Deel): Promise<void> {
+    const naam = this.deelnaam(gemeente, objectId, deel);
+    await this.vraag("POST", `keys/${naam}/config`, { deletion_allowed: true });
+    await this.vraag("DELETE", `keys/${naam}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,5 +198,31 @@ export class LokaalSleutelbeheer implements Sleutelbeheer {
 
   async vernietig(gemeente: string, objectId: string): Promise<void> {
     await rm(this.pad(gemeente, objectId), { force: true });
+  }
+
+  private deelpad(gemeente: string, objectId: string, deel: Deel): string {
+    if (!DEEL.test(deel)) throw new Error("Ongeldig deel");
+    return this.pad(gemeente, objectId).replace(/\.sleutel$/, `-${deel}.sleutel`);
+  }
+
+  async maakDeelsleutel(gemeente: string, objectId: string, deel: Deel): Promise<string> {
+    await mkdir(this.map, { recursive: true });
+    const kek = randomBytes(32);
+    await writeFile(this.deelpad(gemeente, objectId, deel), kek, { flag: "wx", mode: 0o600 });
+    return versleutel(kek, randomBytes(32), `${objectId}/${deel}`).toString("base64");
+  }
+
+  async pakDeelUit(gemeente: string, objectId: string, deel: Deel, verpakt: string): Promise<Buffer> {
+    let kek: Buffer;
+    try {
+      kek = await readFile(this.deelpad(gemeente, objectId, deel));
+    } catch {
+      throw new SleutelVernietigd("De sleutel van dit deel bestaat niet meer");
+    }
+    return ontsleutel(kek, Buffer.from(verpakt, "base64"), `${objectId}/${deel}`);
+  }
+
+  async vernietigDeel(gemeente: string, objectId: string, deel: Deel): Promise<void> {
+    await rm(this.deelpad(gemeente, objectId, deel), { force: true });
   }
 }

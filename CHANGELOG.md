@@ -1,5 +1,22 @@
 # Wijzigingen
 
+## 0.6.0 — 2026-11-09
+
+**Register van persoonsgegevens** (migratie 006, draait vanzelf). Elk persoonsgegeven dat de medewerker bij anonimiseren bevestigt, staat versleuteld in `pii_register`, met een eigen sleutel per document per AVG-categorie (`pii_sleutels`):
+
+- c1, gewone persoonsgegevens (art. 6): AES-256-GCM;
+- c2, bijzondere persoonsgegevens (art. 9): ChaCha20-Poly1305;
+- c3, strafrechtelijke gegevens (art. 10): RSA-OAEP met een eigen sleutelpaar (certificaat) per document; de privésleutel staat versleuteld.
+
+De datasleutels zijn verpakt door het sleutelbeheer (OpenBao transit, sleutel `oa-<gemeente>-<object>-pii-cN`). Dezelfde waarde krijgt dezelfde plaatshouder (`[PERSOON 1]`), via een HMAC-zoeksleutel.
+
+- `POST /objecten/:id/pii` registreert en geeft de plaatshouders;
+- `GET /objecten/:id/pii` geeft het register zonder waarden;
+- `POST /objecten/:id/pii/onthul` geeft waarden, als het niveau van de medewerker (PPL) hoog genoeg is: c1 vraagt PPL 1, c2 PPL 2, c3 PPL 3. Elk inzien is een gebeurtenis;
+- `POST /objecten/:id/pii/vernietig` (beheerder) vernietigt de sleutel van een categorie: die waarden zijn daarna onleesbaar (crypto-shredding).
+
+Versies van vóór het anonimiseren bevatten de gegevens nog leesbaar; die geeft het platform alleen aan PPL 3. Vraagt `SLEUTELBEHEER` (lokaal of openbao).
+
 ## 0.5.0 — 2026-11-09
 
 Migratie 005: **geanonimiseerde weergaven**. `POST /objecten/:id/versies/:n/anonimisering` legt de door de medewerker bevestigde, geanonimiseerde html vast als weergave bij die versie (soort `geanonimiseerd`, versleuteld zoals de versie, in de bucket van het stuk). Een correctie krijgt een hoger volgnummer; ongewijzigd levert niets nieuws op. De gebeurtenis `anonimisering.vastgelegd` bevat alleen de aantallen per soort, nooit de gegevens. Lezen: `GET …/weergaven/html?soort=geanonimiseerd` (de laatste). Het origineel, de gewone weergave en de zoekindex blijven ongewijzigd. Tests: `test/anonimisering.test.js`.

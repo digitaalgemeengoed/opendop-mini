@@ -35,7 +35,7 @@ export interface ObjectMetStaat extends Informatieobject {
 // Gebeurtenissen
 // ---------------------------------------------------------------------------
 
-async function legGebeurtenisVast(
+export async function legGebeurtenisVast(
   c: Client,
   gemeente: string,
   type: Gebeurtenistype,
@@ -236,7 +236,7 @@ export async function maakObject(
   return leesObject(c, id);
 }
 
-async function vergrendel(
+export async function vergrendel(
   c: Client,
   id: string,
   verwacht?: number,

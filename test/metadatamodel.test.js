@@ -106,3 +106,12 @@ test("stukken houden hun versie; een nieuw stuk krijgt het nieuwe model", { skip
   const w = await vraag("PUT", `/objecten/${zid}/metadata`, { metadata: { naam: "Zandvoorts stuk 2", informatiecategorie: "adviezen", vertrouwelijkheid: "openbaar" }, verwacht: z.json().volgnummer }, kop("zandvoort"));
   assert.equal(w.statusCode, 200, w.body);
 });
+
+test("een andere naam is een nieuwe versie; de versies noemen de naam", { skip: overslaan }, async () => {
+  const p = await vraag("POST", "/objecttypen/document/model", { config: { ...rgbz([{ sleutel: "wijk", aan: true, verplicht: false, label: "Wijk", eigen: { type: "keuze", opties: ["Centrum", "Noord"] } }]), naam: "RGBZ Bloemendaal" } });
+  assert.equal(p.statusCode, 201, p.body);
+  assert.equal(p.json().versie, 3);
+  const v = (await vraag("GET", "/objecttypen/document/versies")).json();
+  assert.deepEqual(v.map((x) => [x.versie, x.modelnaam]), [[3, "RGBZ Bloemendaal"], [2, "RGBZ"], [1, "Standaardmodel"]]);
+  assert.equal((await vraag("POST", "/objecttypen/document/model", { config: { ...rgbz(), naam: "x".repeat(81) } })).statusCode, 400);
+});

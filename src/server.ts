@@ -11,7 +11,7 @@ const VERSIE = (() => {
   }
 })();
 import type { Actor, AnonimiseringsMeting, Inhoud, PiiInvoer, Zoekantwoord, Zoekresultaat } from "@digitaalgemeengoed/oa-contract";
-import { INHOUD_SCHEMA, METADATAMODELLEN, SIGNAALWOORDEN, ROLLEN, WAARDELIJSTEN, actieveVelden, controleerConfig, rolWaarden, schemaUitConfig, type MetadatamodelConfig } from "@digitaalgemeengoed/oa-contract";
+import { INHOUD_SCHEMA, METADATAMODELLEN, MODELNAAM_MAX, SIGNAALWOORDEN, ROLLEN, WAARDELIJSTEN, actieveVelden, controleerConfig, rolWaarden, schemaUitConfig, type MetadatamodelConfig } from "@digitaalgemeengoed/oa-contract";
 import { inGemeente } from "./db.js";
 import { ZoekenUit, type Zoekindex } from "./zoekindex.js";
 import {
@@ -123,6 +123,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     additionalProperties: false,
     properties: {
       basis: { enum: ["mdto", "rgbz", "tmlo"] },
+      naam: { type: "string", maxLength: MODELNAAM_MAX },
       velden: {
         type: "array",
         maxItems: 200,

@@ -1,5 +1,10 @@
 # Wijzigingen
 
+## 0.10.0 — 2026-11-10
+
+- Het metadatamodel kan een naam hebben (`config.naam`, hoogstens 80 tekens); een andere naam is een nieuwe versie van het objecttype.
+- `GET /objecttypen/:naam/versies` noemt per versie de `modelnaam`.
+
 ## 0.9.0 — 2026-11-09
 
 **Kwaliteit van het anonimiseren.**

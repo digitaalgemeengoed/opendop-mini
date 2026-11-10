@@ -10,6 +10,7 @@ import type {
   Versie,
   Weergave,
 } from "@digitaalgemeengoed/oa-contract";
+import { configUitSchema, modelnaam } from "@digitaalgemeengoed/oa-contract";
 import type { Client } from "./db.js";
 import type { Opslag } from "./opslag.js";
 import { ontsleutel, SleutelVernietigd, versleutel, type Sleutelbeheer } from "./sleutelbeheer.js";
@@ -131,6 +132,7 @@ export async function versiesVanObjecttype(c: Client, gemeente: string, naam: st
     gedeeld: x.gedeeld as boolean,
     door: (x.actor as { naam?: string; sub?: string } | null)?.naam ?? null,
     model: ((x.schema as Record<string, unknown>)["x-oa-model"] as string | undefined) ?? null,
+    modelnaam: modelnaam(configUitSchema(x.schema)),
     config: ((x.schema as Record<string, unknown>)["x-oa-config"] as unknown) ?? null,
     velden: Object.keys(((x.schema as { properties?: object }).properties ?? {}) as object).length,
   }));

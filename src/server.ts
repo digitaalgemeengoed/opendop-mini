@@ -34,6 +34,21 @@ import {
   legAnonimiseringVast,
 } from "./objecten.js";
 import { meetKwaliteit } from "./kwaliteit.js";
+import {
+  SELECTIELIJSTEN,
+  beoordeelVoorstel,
+  dienVoorstelIn,
+  leesClassificatiemodel,
+  leesVoorstel,
+  leesVoorstelWeergave,
+  legClassificatieVast,
+  lijstVan,
+  lijstVoorstellen,
+  publiceerClassificatiemodel,
+  statussenVan,
+  versiesClassificatiemodel,
+} from "./classificatie.js";
+import { CLASSIFICATIEMODELNAAM_MAX, controleerClassificatiemodel, resultatenInGebruik, standaardClassificatiemodel, type ClassificatiemodelConfig } from "@digitaalgemeengoed/oa-contract";
 import { bevestigPii, leesPiiRegister, onthulPii, registreerPii, terugzettenPii, toetsVersieMetPii, vernietigPii, vervallenPii, wijzigCategoriePii, zetVersieTerug } from "./piiregister.js";
 
 interface Context {
@@ -70,6 +85,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
     // Het PPL-niveau komt van de integratielaag (rollen ppl-1..3); alles anders telt als 0.
     actor.niveau = ([0, 1, 2, 3] as const).find((n) => n === actor.niveau) ?? 0;
     actor.beheerder = actor.beheerder === true;
+    actor.vrijgever = actor.vrijgever === true;
     return { gemeente, actor };
   }
 
@@ -163,6 +179,193 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
       const problemen = controleerConfig(req.body.config);
       const fout = problemen.some((p) => p.ernst === "fout");
       return { problemen, velden: actieveVelden(req.body.config), schema: fout ? null : schemaUitConfig(req.body.config) };
+    },
+  );
+
+  // --- Classificeren en bewaren --------------------------------------------------
+
+  const CLASSIFICATIEMODEL_SCHEMA = {
+    type: "object",
+    required: ["selectielijst", "attributen", "vergrendelBij", "termijnStartBij"],
+    additionalProperties: false,
+    properties: {
+      naam: { type: "string", maxLength: CLASSIFICATIEMODELNAAM_MAX },
+      selectielijst: { enum: Object.keys(SELECTIELIJSTEN) },
+      uitgezet: { type: "array", maxItems: 1000, items: { type: "string", maxLength: 20 } },
+      afwijkingen: {
+        type: "array",
+        maxItems: 500,
+        items: {
+          type: "object",
+          required: ["resultaat", "reden"],
+          additionalProperties: false,
+          properties: {
+            resultaat: { type: "string", maxLength: 20 },
+            waardering: { enum: ["vernietigen", "blijvend-bewaren"] },
+            bewaartermijn: { type: "string", maxLength: 20 },
+            reden: { type: "string", maxLength: 1000 },
+          },
+        },
+      },
+      attributen: {
+        type: "array",
+        maxItems: 50,
+        items: {
+          type: "object",
+          required: ["sleutel", "label", "type", "verplicht"],
+          additionalProperties: false,
+          properties: {
+            sleutel: { type: "string", maxLength: 40 },
+            label: { type: "string", maxLength: 100 },
+            type: { enum: ["tekst", "keuze", "ja-nee"] },
+            opties: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 200 } },
+            verplicht: { type: "boolean" },
+            beschrijving: { type: "string", maxLength: 500 },
+          },
+        },
+      },
+      vergrendelBij: { type: "array", maxItems: 20, items: { type: "string", maxLength: 100 } },
+      termijnStartBij: { type: "string", maxLength: 100 },
+    },
+  } as const;
+
+  /** Voor het paneel: het model dat nu geldt, met de resultaten die de gemeente gebruikt. */
+  app.get<{ Querystring: { alleenModel?: string } }>("/classificatie", async (req) => {
+    const { gemeente } = context(req);
+    return inGemeente(gemeente, async (c) => {
+      const model = await leesClassificatiemodel(c);
+      if (!model || req.query.alleenModel) return { model };
+      const lijst = lijstVan(model.config);
+      return {
+        model,
+        selectielijst: { id: lijst.id, naam: lijst.naam, toelichting: lijst.toelichting, procestypen: lijst.procestypen, resultaten: resultatenInGebruik(model.config, lijst) },
+      };
+    });
+  });
+
+  /** Voor het beheerportaal: de selectielijst, de statussen uit het metadatamodel, het model en zijn versies. */
+  app.get("/classificatiemodel", async (req) => {
+    const { gemeente } = context(req);
+    return inGemeente(gemeente, async (c) => {
+      const type = await leesObjecttype(c, "document");
+      return {
+        selectielijsten: Object.values(SELECTIELIJSTEN),
+        statussen: statussenVan(type),
+        standaard: standaardClassificatiemodel(),
+        actief: await leesClassificatiemodel(c),
+        versies: await versiesClassificatiemodel(c),
+      };
+    });
+  });
+
+  app.post<{ Body: { config: ClassificatiemodelConfig } }>(
+    "/classificatiemodel/controle",
+    { schema: { body: { type: "object", required: ["config"], properties: { config: CLASSIFICATIEMODEL_SCHEMA } } } },
+    async (req) => {
+      const { gemeente } = context(req);
+      const type = await inGemeente(gemeente, (c) => leesObjecttype(c, "document"));
+      return { problemen: controleerClassificatiemodel(req.body.config, lijstVan(req.body.config), statussenVan(type)) };
+    },
+  );
+
+  app.post<{ Body: { config: ClassificatiemodelConfig } }>(
+    "/classificatiemodel",
+    { schema: { body: { type: "object", required: ["config"], additionalProperties: false, properties: { config: CLASSIFICATIEMODEL_SCHEMA } } } },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const model = await inGemeente(gemeente, (c) => publiceerClassificatiemodel(c, gemeente, actor, req.body.config));
+      return antwoord.status(201).send(model);
+    },
+  );
+
+  app.put<{ Params: { id: string }; Body: { resultaat: string; attributen?: Record<string, string | boolean>; einddatumProcesobject?: string; verwachteVolgnummer?: number } }>(
+    "/objecten/:id/classificatie",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["resultaat"],
+          additionalProperties: false,
+          properties: {
+            resultaat: { type: "string", maxLength: 20 },
+            attributen: { type: "object", maxProperties: 50, additionalProperties: { type: ["string", "boolean"] } },
+            einddatumProcesobject: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+            verwachteVolgnummer: { type: "integer" },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return legClassificatieVast(c, gemeente, actor, req.params.id, req.body);
+      });
+    },
+  );
+
+  // --- Vergrendeld: wijzigingsvoorstellen -------------------------------------------
+
+  app.post<{ Params: { id: string }; Body: { inhoud: Inhoud; weergave?: Inhoud; reden: string } }>(
+    "/objecten/:id/voorstellen",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["inhoud", "reden"],
+          properties: { inhoud: INHOUD_SCHEMA, weergave: WEERGAVE_SCHEMA, reden: { type: "string", minLength: 5, maxLength: 1000 } },
+        },
+      },
+    },
+    async (req, antwoord) => {
+      const { gemeente, actor } = context(req);
+      const v = await inGemeente(gemeente, async (c) => {
+        await toetsToegang(c, req.params.id, actor);
+        return dienVoorstelIn(c, m, gemeente, actor, req.params.id, req.body);
+      });
+      return antwoord.status(201).send(v);
+    },
+  );
+
+  app.get<{ Querystring: { object?: string; status?: string } }>(
+    "/voorstellen",
+    { schema: { querystring: { type: "object", properties: { object: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" }, status: { enum: ["open", "goedgekeurd", "afgewezen"] } } } } },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, async (c) => {
+        if (req.query.object) await toetsToegang(c, req.query.object, actor);
+        // Zonder object: de lijst om te beoordelen, alleen voor vrijgevers.
+        else if (!actor.vrijgever) throw new PlatformFout(403, "geen-vrijgever", "Alleen een vrijgever ziet alle voorstellen.");
+        return lijstVoorstellen(c, { object: req.query.object, status: req.query.status ?? (req.query.object ? undefined : "open") });
+      });
+    },
+  );
+
+  app.get<{ Params: { vid: string } }>("/voorstellen/:vid/weergave", async (req) => {
+    const { gemeente, actor } = context(req);
+    return inGemeente(gemeente, async (c) => {
+      const v = await leesVoorstel(c, req.params.vid);
+      await toetsToegang(c, v.object, actor);
+      if (!actor.vrijgever && v.door.sub !== actor.sub) throw new PlatformFout(403, "geen-vrijgever", "Alleen de indiener en een vrijgever zien het voorstel.");
+      return leesVoorstelWeergave(c, m, gemeente, req.params.vid);
+    });
+  });
+
+  app.post<{ Params: { vid: string }; Body: { besluit: "goedkeuren" | "afwijzen"; toelichting?: string } }>(
+    "/voorstellen/:vid/beoordeling",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["besluit"],
+          additionalProperties: false,
+          properties: { besluit: { enum: ["goedkeuren", "afwijzen"] }, toelichting: { type: "string", maxLength: 1000 } },
+        },
+      },
+    },
+    async (req) => {
+      const { gemeente, actor } = context(req);
+      return inGemeente(gemeente, (c) => beoordeelVoorstel(c, m, gemeente, actor, req.params.vid, req.body));
     },
   );
 

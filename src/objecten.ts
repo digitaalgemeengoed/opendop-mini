@@ -15,6 +15,7 @@ import type { Client } from "./db.js";
 import type { Opslag } from "./opslag.js";
 import { ontsleutel, SleutelVernietigd, versleutel, type Sleutelbeheer } from "./sleutelbeheer.js";
 import { schemaBruikbaar, toets, type Toetsing } from "./validatie.js";
+import { onthoudStatus, toetsVergrendeling, verrijk } from "./classificatie.js";
 
 export class PlatformFout extends Error {
   constructor(
@@ -189,7 +190,7 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
   const type = await leesObjecttype(c, o.objecttype_naam, o.objecttype_versie);
   // Een persoonlijk stuk heeft geen metadata: dan is er ook niets onvolledig.
   const t = o.aard === "persoonlijk" ? { ontbreekt: [] as string[] } : toets(`${type.naam}@${type.versie}`, type.schema, o.metadata);
-  return {
+  return verrijk(c, {
     identificatie: o.identificatie,
     aard: o.aard,
     gemeente: o.gemeente,
@@ -216,7 +217,7 @@ export async function leesObject(c: Client, id: string): Promise<ObjectMetStaat>
     onleesbaarGemaakt: o.onleesbaar_gemaakt ? o.onleesbaar_gemaakt.toISOString() : null,
     volgnummer: Number(o.laatste_volgnummer),
     volledigheid: { volledig: t.ontbreekt.length === 0, ontbreekt: t.ontbreekt },
-  };
+  }, o, type);
 }
 
 
@@ -258,6 +259,7 @@ export async function maakObject(
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [id, gemeente, type.naam, type.versie, metadata, g.volgnummer, g.tijdstip, actor.sub, verpakt !== null, verpakt, aard],
   );
+  if (aard === "zakelijk") await onthoudStatus(c, id, type, metadata, g.tijdstip);
   // Persoonlijke stukken gaan niet in de zoekindex.
   if (aard === "zakelijk") await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
   if (vraag.inhoud) await voegVersieToe(c, m, gemeente, actor, id, vraag.inhoud, undefined, vraag.weergave);
@@ -309,6 +311,7 @@ export async function legMetadataVast(
 ): Promise<ObjectMetStaat> {
   const staat = await vergrendel(c, id, verwachteVolgnummer);
   if (staat.aard === "persoonlijk") throw GEEN_METADATA();
+  await toetsVergrendeling(c, id, actor, "metadata");
   const huidig = await leesObject(c, id);
   const type = await leesObjecttype(c, huidig.objecttype.naam, huidig.objecttype.versie);
   weigerOngeldig(toets(`${type.naam}@${type.versie}`, type.schema, metadata));
@@ -324,6 +327,7 @@ export async function legMetadataVast(
     metadata,
     g.volgnummer,
   ]);
+  await onthoudStatus(c, id, type, metadata, g.tijdstip);
   await zetInOutbox(c, gemeente, g.volgnummer, "zoekindex");
   return leesObject(c, id);
 }
@@ -337,7 +341,7 @@ export function decodeer(inhoud: Inhoud, maxBytes: number): Buffer {
 const ONLEESBAAR = () =>
   new PlatformFout(410, "onleesbaar", "De sleutel van dit stuk is vernietigd. De inhoud is onleesbaar; de registratie blijft bestaan.");
 
-async function datasleutel(m: Middelen, gemeente: string, id: string, verpakt: string | null): Promise<Buffer> {
+export async function datasleutel(m: Middelen, gemeente: string, id: string, verpakt: string | null): Promise<Buffer> {
   if (!m.sleutelbeheer || !verpakt) {
     throw new PlatformFout(503, "sleutelbeheer-uit", "Dit stuk is versleuteld, maar het sleutelbeheer is in deze omgeving niet ingesteld.");
   }
@@ -358,7 +362,7 @@ export async function voegVersieToe(
   inhoud: Inhoud,
   verwachteVolgnummer?: number,
   weergave?: Inhoud,
-  opties: { soort?: "gewoon" | "anonimisering" | "terugzetting"; bronversie?: number; ppl?: number } = {},
+  opties: { soort?: "gewoon" | "anonimisering" | "terugzetting"; bronversie?: number; ppl?: number; vrijgave?: boolean } = {},
 ): Promise<ObjectMetStaat> {
   const staat = await vergrendel(c, id, verwachteVolgnummer);
   if (staat.onleesbaar) throw ONLEESBAAR();
@@ -380,6 +384,9 @@ export async function voegVersieToe(
     // Ongewijzigde inhoud: geen nieuwe versie, geen gebeurtenis.
     return leesObject(c, id);
   }
+  // Een vergrendeld stuk krijgt alleen nog een geanonimiseerde versie (voor
+  // openbaarmaking) of een goedgekeurd wijzigingsvoorstel.
+  if (!opties.vrijgave && opties.soort !== "anonimisering") await toetsVergrendeling(c, id, actor, "versie");
   const nummer = laatste.rowCount ? laatste.rows[0].nummer + 1 : 1;
   const sleutel = `${id}/${nummer}-${sha256.slice(0, 16)}`;
   const dek = staat.versleuteld ? await datasleutel(m, gemeente, id, staat.verpakt) : null;

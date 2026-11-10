@@ -1,5 +1,15 @@
 # Wijzigingen
 
+## 0.11.0 — 2026-11-10
+
+**Classificeren, bewaren, vergrendelen en wijzigingsvoorstellen.**
+
+- Migratie 009: `classificatiemodellen` (versies per gemeente), `objecten.classificatie` en `objecten.statusdata` (per status de dag waarop het stuk die status voor het eerst kreeg), en `wijzigingsvoorstellen` (naast het stuk; de inhoud versleuteld met de sleutel van het stuk). Alles met rijbeveiliging per gemeente.
+- `GET /classificatiemodel`, `POST /classificatiemodel/controle`, `POST /classificatiemodel` (publiceren, getoetst tegen de statussen van het metadatamodel); `GET /classificatie` (`?alleenModel=1` zonder de lijst).
+- `PUT /objecten/:id/classificatie`: klasse en attributen, getoetst tegen het model.
+- **Vergrendeld** (status in `vergrendelBij`): geen nieuwe versie (409 `vergrendeld`), geen andere metadata of classificatie, behalve voor een vrijgever. Een geanonimiseerde versie (voor openbaarmaking) mag wel.
+- `POST /objecten/:id/voorstellen`, `GET /voorstellen` (open voorstellen alleen voor een vrijgever), `GET /voorstellen/:id/weergave`, `POST /voorstellen/:id/beoordeling`: goedkeuren maakt een versie op naam van de indiener; niet het eigen voorstel; een voorstel op een verouderde versie wordt geweigerd.
+
 ## 0.10.0 — 2026-11-10
 
 - Het metadatamodel kan een naam hebben (`config.naam`, hoogstens 80 tekens); een andere naam is een nieuwe versie van het objecttype.

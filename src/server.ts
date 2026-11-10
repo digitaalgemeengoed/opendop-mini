@@ -154,6 +154,7 @@ export function bouwServer(opties: { middelen: Middelen; zoekindex: Zoekindex; d
             label: { type: "string", maxLength: 100 },
             beschrijving: { type: "string", maxLength: 500 },
             waardelijst: { type: "string", maxLength: 60 },
+            geenCategorie: { type: "boolean" },
             eigen: {
               type: "object",
               required: ["type"],

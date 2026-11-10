@@ -153,3 +153,11 @@ test("vrijgeven: een andere vrijgever keurt goed (nieuwe versie) of wijst af; da
   const ev = (await vraag("GET", `/objecten/${id}/gebeurtenissen`)).json().map((e) => e.type);
   for (const t of ["voorstel.ingediend", "voorstel.goedgekeurd", "voorstel.afgewezen"]) assert.ok(ev.includes(t), t);
 });
+
+test("Woo: een stuk zonder informatiecategorie legt dat vast als keuze", { skip: overslaan }, async () => {
+  const { GEEN_WOO_CATEGORIE } = await import("@digitaalgemeengoed/oa-contract");
+  const o = await vraag("POST", "/objecten", { objecttype: "document", metadata: { ...md("in bewerking"), titel: "Gespreksverslag met bewoner", informatiecategorie: GEEN_WOO_CATEGORIE } });
+  assert.equal(o.statusCode, 201, o.body);
+  assert.equal(o.json().metadata.informatiecategorie, GEEN_WOO_CATEGORIE);
+  assert.equal((await vraag("POST", "/objecten", { objecttype: "document", metadata: { ...md("in bewerking"), informatiecategorie: "geen" } })).statusCode, 422);
+});

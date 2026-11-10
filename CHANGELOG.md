@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 0.11.1 — 2026-11-10
+
+Het metadatamodel accepteert `geenCategorie` bij het veld voor de Woo-informatiecategorie (oa-contract 0.8.1).
+
 ## 0.11.0 — 2026-11-10
 
 **Classificeren, bewaren, vergrendelen en wijzigingsvoorstellen.**
